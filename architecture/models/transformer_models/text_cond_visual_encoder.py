@@ -2,10 +2,11 @@ import math
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
 from dataclasses import dataclass
-from typing import List, Literal
-
+from typing import List, Literal,Dict, Optional, Tuple, Protocol
+from einops import rearrange
 import torch
 import torch.nn as nn
+from torch import Tensor
 from open_clip import create_model_from_pretrained
 from open_clip.transformer import TextTransformer
 from transformers import T5EncoderModel
@@ -13,7 +14,172 @@ from transformers import T5EncoderModel
 from architecture.models.transformer_models.image_encoders import IMAGE_ENCODERS
 from utils.bbox_utils import get_best_of_two_bboxes
 from utils.sensor_constant_utils import is_a_visual_sensor
+from perceiver_io.encoder import PerceiverEncoder
+from perceiver_io.decoders import PerceiverDecoder
+from perceiver_io import PerceiverIO
 
+class Attention(Protocol):
+    def forward(
+            self,
+            x: torch.Tensor,
+            context: Optional[torch.Tensor] = None,
+            mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Implementation of attention. Should return tuple of (feature, attention_map).
+        """
+
+
+def plain_attention(
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        attention_dropout: float = 0.0,
+        training: bool = True,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Args:
+        query: (batch, out_seq_len, dim)
+        key_value: (batch, in_seq_len, 2, dim)
+        mask: (batch, out_seq_len, in_seq_len)
+        attention_dropout: dropout probability
+        training: whether in training mode
+
+    Returns:
+        Tuple[Tensor, Tensor]: (feature, attention_map)
+        where:
+            feature: (batch, out_seq_len, dim)
+            attention_map: (batch, heads, out_seq_len, in_seq_len)
+    """
+    key, value = key_value.unbind(-3)
+
+    # keyT = key.permute(0, 2, 3, 1)  # transpose to (batch, heads, dim, in_seq_len)
+    keyT = key.permute(0, 1, 3, 4, 2)
+    value = value.transpose(2, 3)  # transpose to (batch, heads, in_seq_len, dim)
+    query = query.transpose(2, 3)  # transpose to (batch, heads, out_seq_len, dim)
+
+    softmax_scale = query.shape[-1] ** (-0.5)
+    dots = torch.matmul(query * softmax_scale, keyT)
+    if mask is not None:
+        assert (
+                mask.shape[-2:] == dots.shape[-2:]
+        ), f"Mask shape {mask.shape} does not match attention shape {dots.shape}"
+        inv_mask = (
+            (~mask).unsqueeze(-3).expand_as(dots)
+        )  # pylint: disable=invalid-unary-operand-type
+        dots.masked_fill_(inv_mask, float("-inf"))
+
+    attn = dots.softmax(dim=-1, dtype=torch.float).to(
+        value.dtype
+    )  # (batch, heads, out_seq_len, in_seq_len)
+    if attention_dropout > 0:
+        attn = F.dropout(attn, p=attention_dropout, training=training)
+
+    y = torch.matmul(attn, value).transpose(
+        2, 3
+    )  # transpose to (batch, seq_len, heads, dim)
+    return y, attn
+
+
+def make_ffn(dim, mult=4):
+    return nn.Sequential(
+        nn.Linear(dim, dim * mult, bias=False),
+        nn.GELU(),
+        nn.Linear(dim * mult, dim, bias=False),
+    )
+class PlainAttention(nn.Module):
+    """
+    Attention module from original Transformer paper.
+    """
+
+    def __init__(
+            self,
+            model_dim: int,
+            context_dim: Optional[int] = None,
+            num_heads: int = 8,
+            attention_dropout: float = 0.0,
+            head_dim: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        context_dim = model_dim if context_dim is None else context_dim
+        if head_dim is None:
+            assert (
+                    model_dim % num_heads == 0
+            ), f"model_dim ({model_dim}) must be divisible by num_heads ({num_heads})"
+            head_dim = model_dim // num_heads
+        self.num_heads = num_heads
+        self.attention_dropout = attention_dropout
+        self.to_q = nn.Linear(model_dim, head_dim * num_heads, bias=False)
+        self.to_kv = nn.Linear(context_dim, head_dim * num_heads * 2, bias=False)
+        self.to_out = nn.Linear(head_dim * num_heads, model_dim)
+
+    def forward(
+            self, x, context=None, mask: Optional[torch.Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        :param x: [batch, seq_len, model_dim]
+        :param context: [batch, context_len, context_dim]
+        :param mask: [batch, seq_len, context_len]
+        """
+
+        context = x if context is None else context
+        query = rearrange(
+            self.to_q(x),
+            "batch seq (head feature) -> batch seq head feature",
+            head=self.num_heads,
+        )
+        key_value = rearrange(
+            self.to_kv(context),
+            "batch seq (n head feature) -> batch seq n head feature",
+            head=self.num_heads,
+            n=2,
+        )
+        y, attn = plain_attention(
+            query=query,
+            key_value=key_value,
+            mask=mask,
+            attention_dropout=self.attention_dropout,
+            training=self.training,
+        )
+        y = self.to_out(y.flatten(-2))
+        return y, attn
+
+
+class TransformerBlock(nn.Module):
+    """
+    A transformer block with pre-normalization.
+    """
+
+    def __init__(
+            self,
+            model_dim: int,
+            attention: Attention,
+            context_dim: Optional[int] = None,
+            extra_context_norm: bool = False,
+    ):
+        super().__init__()
+        context_dim = model_dim if context_dim is None else context_dim
+        self.attention = attention
+        self.ff = make_ffn(model_dim)
+        self.pre_norm1 = nn.LayerNorm(model_dim)
+        self.pre_norm2 = nn.LayerNorm(context_dim) if extra_context_norm else None
+        self.pre_norm3 = nn.LayerNorm(model_dim)
+
+    def forward(self, x, context=None, mask=None) -> Tuple[Tensor, Tensor]:
+        context = x if context is None else context
+        if self.pre_norm2 is not None:
+            y, attn = self.attention.forward(
+                self.pre_norm1(x), context=self.pre_norm2(context), mask=mask
+            )
+        elif x is not context:
+            y, attn = self.attention.forward(
+                self.pre_norm1(x), context=self.pre_norm1(context), mask=mask
+            )
+        else:
+            y, attn = self.attention.forward(self.pre_norm1(x), mask=mask)
+        x = x + y
+        x = x + self.ff(self.pre_norm3(x))
+        return x, attn
 
 @dataclass
 class TransformerConfig:
@@ -82,12 +248,23 @@ class TextCondMultiCameraVisualEncoder(nn.Module):
             nn.LayerNorm(self.cfg.fusion_xformer.d_model),
             nn.ReLU(),
         )
-        self.fusion_xformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=cfg.fusion_xformer.d_model, nhead=cfg.fusion_xformer.nhead, batch_first=True
-            ),
-            num_layers=cfg.fusion_xformer.num_layers,
+        # 使用官方PerceiverIO
+        num_latents = 8
+        latent_dim = self.cfg.fusion_xformer.d_model
+        input_dim = self.cfg.fusion_xformer.d_model
+        decoder_query_dim = self.cfg.fusion_xformer.d_model
+        encoder = PerceiverEncoder(
+            num_latents=num_latents,
+            latent_dim=latent_dim,
+            input_dim=input_dim,
+            num_self_attn_per_block=cfg.fusion_xformer.nhead,
+            num_blocks=cfg.fusion_xformer.num_layers
         )
+        decoder = PerceiverDecoder(
+            latent_dim=latent_dim,
+            query_dim=decoder_query_dim
+        )
+        self.fusion_xformer = PerceiverIO(encoder, decoder)
         self.fusion_token = nn.Parameter(0.1 * torch.rand(cfg.fusion_xformer.d_model))
         self.visual_sensors = [sensor for sensor in cfg.input_sensors if is_a_visual_sensor(sensor)]
         # KE: This is absolutely important! # KE2: Actually not so much anymore lol
@@ -125,7 +302,7 @@ class TextCondMultiCameraVisualEncoder(nn.Module):
             nn.Conv2d(self.cfg.fusion_xformer.d_model, self.cfg.fusion_xformer.d_model, 1),
             nn.ReLU(),
         )
-
+    # image-text feature
     def get_image_text_feats(self, frames, goals, text_feats):
         all_img_features = {}
         images_chw = None
@@ -175,11 +352,11 @@ class TextCondMultiCameraVisualEncoder(nn.Module):
             D,
         ) = self.get_image_text_feats(frames, goals, text_feats)
         input_features = [fusion_token, concatenated_feats, text_feats_]
-
-        fused_feats = self.fusion_xformer(torch.cat(input_features, 1))
-
-        fused_feats = fused_feats[:, 0, :]  # BTxD
-
+        context = torch.cat(input_features, 1)  # [B*T, seq, D]
+        # 以第一个token作为query
+        query = context[:, :1, :]  # [B*T, 1, D]
+        fused_feats = self.fusion_xformer(context, query)  # [B*T, 1, D]
+        fused_feats = fused_feats[:, 0, :]  # [B*T, D]
         return fused_feats.reshape(B, T, D), text_feats
 
 
