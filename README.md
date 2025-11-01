@@ -182,3 +182,13 @@ See the [english-wordnet](https://github.com/globalwordnet/english-wordnet) repo
     eprint    = {2312.02976},
 }
 ```
+
+if u want to eval ur il model
+```bash
+python -m training.offline.online_eval --shuffle --eval_subset minival --output_basedir ~/spoc-robot-training/il_eval --test_augmentation --task_type ObjectNavType --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand --house_set objaverse --training_run_id gsx6pd5b --ckptStep 4000 --num_workers 4 --gpu_devices 2 --wandb_project_name spoc-imitation --wandb_entity_name lntunicom-uestc
+```
+
+if u want to train ur il model
+```bash
+-m training.offline.train_pl --max_samples 10000 --eval_max_samples 1600 --eval_every 200 --save_every 2000 --model_version siglip_base_3 --sliding_window 4 --per_gpu_batch 64 --lr 0.001 --data_dir /nfs4/lint/PoliData/fifteen --dataset_version ObjectNavType --model EarlyFusionCnnTransformer --input_sensors raw_navigation_camera raw_manipulation_camera last_actions an_object_is_in_hand --precision 16-mixed --loss action --max_epochs 50 --log_video_every 50000 --resume_local --output_dir imitation_result --num_nodes 1 --wandb_logging True --wandb_project_name spoc-imitation --wandb_entity_name lntunicom-uestc
+```
