@@ -367,8 +367,20 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         if requested is None or requested == "":
             requested = "auto"
         requested_lower = requested.lower() if isinstance(requested, str) else str(requested)
-        if requested_lower in {"auto", "cuda:auto"}:
-            requested = "cuda" if torch.cuda.is_available() else "cpu"
+        # If user asked for auto/cuda:auto or simply 'cuda', map to the current CUDA device
+        if requested_lower in {"auto", "cuda:auto", "cuda"}:
+            if torch.cuda.is_available():
+                # Map to the current process's CUDA device index to avoid cross-process device mixups
+                try:
+                    idx = torch.cuda.current_device()
+                    return torch.device(f"cuda:{idx}")
+                except Exception:
+                    # Fallback to default CUDA device if current_device() fails
+                    return torch.device("cuda")
+            else:
+                return torch.device("cpu")
+
+        # Otherwise try to construct the device directly (e.g. 'cuda:0' or 'cpu')
         try:
             device = torch.device(requested)
         except (TypeError, RuntimeError):
@@ -377,12 +389,14 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 RuntimeWarning,
             )
             device = torch.device("cpu")
+
         if device.type == "cuda" and not torch.cuda.is_available():
             warnings.warn(
                 "CUDA requested for Grounding DINO but no GPU is available; using CPU instead.",
                 RuntimeWarning,
             )
             device = torch.device("cpu")
+
         return device
 
     def _store_latest(
