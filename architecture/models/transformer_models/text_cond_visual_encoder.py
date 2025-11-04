@@ -290,9 +290,10 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             nn.ReLU(),
         )
         if cfg.use_detector:
+            detector_device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
             self.detector: Optional[GroundingDINOPredictor] = GroundingDINOPredictor(
                 model_id=cfg.detector_model_id,
-                device=cfg.detector_device,
+                device=f"cuda:{detector_device}" if torch.cuda.is_available() else "cpu",
                 box_threshold=cfg.detector_box_threshold,
                 text_threshold=cfg.detector_text_threshold,
                 max_detections=cfg.max_object_tokens,

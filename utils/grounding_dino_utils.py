@@ -82,14 +82,27 @@ class GroundingDINOPredictor:
             with torch.no_grad():
                 outputs = self.model(**inputs)
             target_size = torch.tensor([pil_image.size[::-1]], device=self.device)
-            processed = self.processor.post_process_object_detection(
+            processed = self.processor.post_process_grounded_object_detection(
                 outputs,
                 threshold=box_threshold,
                 target_sizes=target_size,
             )[0]
             boxes_absolute = processed["boxes"].detach().cpu()
             scores = processed["scores"].detach().cpu()
-            labels_idx = processed["labels"].detach().cpu().to(torch.int64)
+            # 兼容新版 transformers
+            labels_field = processed.get("text_labels", None)
+            if labels_field is not None:
+                # 新版，直接是字符串列表
+                labels = labels_field
+                labels_idx = None
+            else:
+                # 旧版，labels 是 tensor 或 list
+                labels_idx = processed["labels"]
+                if isinstance(labels_idx, torch.Tensor):
+                    labels_idx = labels_idx.detach().cpu().to(torch.int64)
+                else:
+                    labels_idx = torch.tensor(labels_idx, dtype=torch.int64)
+                labels = [phrases[idx] if 0 <= idx < len(phrases) else "" for idx in labels_idx.tolist()]
 
             if scores.numel() == 0:
                 results.append(
@@ -106,7 +119,9 @@ class GroundingDINOPredictor:
             keep = scores >= text_threshold
             boxes_absolute = boxes_absolute[keep]
             scores = scores[keep]
-            labels_idx = labels_idx[keep]
+            # labels_idx = labels_idx[keep]
+            if labels_idx is not None:
+                labels_idx = labels_idx[keep]
 
             if scores.numel() == 0:
                 results.append(
@@ -123,10 +138,12 @@ class GroundingDINOPredictor:
             if max_detections is not None and scores.numel() > max_detections:
                 topk_scores, topk_idx = torch.topk(scores, max_detections)
                 boxes_absolute = boxes_absolute[topk_idx]
-                labels_idx = labels_idx[topk_idx]
+                if labels_idx is not None:
+                    labels_idx = labels_idx[topk_idx]
                 scores = topk_scores
 
-            labels = [phrases[idx] if 0 <= idx < len(phrases) else "" for idx in labels_idx.tolist()]
+            if labels_idx is not None:
+                labels = [phrases[idx] if 0 <= idx < len(phrases) else "" for idx in labels_idx.tolist()]
             boxes_normalized = self._normalize_boxes(boxes_absolute, pil_image.size[::-1])
             results.append(
                 GroundingDINOResult(
