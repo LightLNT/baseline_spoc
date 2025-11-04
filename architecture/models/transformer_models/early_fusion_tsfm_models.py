@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from open_clip.tokenizer import HFTokenizer
 from open_clip.transformer import TextTransformer
@@ -267,6 +269,9 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.text_encoder = "t5-small"
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
             model_cfg.visual_encoder.input_sensors = input_sensors
+            detector_device_env = os.environ.get("GROUNDING_DINO_DEVICE")
+            if detector_device_env:
+                model_cfg.visual_encoder.detector_device = detector_device_env
             model_cfg.decoder = TransformerConfig(3, 512, 8)
         elif model_version == "siglip_large_3":
             model_cfg.visual_encoder.image_encoder = "SigLIPLarge"

@@ -1,4 +1,5 @@
 import math
+import warnings
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
 from dataclasses import dataclass, field
@@ -290,16 +291,18 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             nn.ReLU(),
         )
         if cfg.use_detector:
-            detector_device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+            detector_device = self._resolve_detector_device(cfg.detector_device)
             self.detector: Optional[GroundingDINOPredictor] = GroundingDINOPredictor(
                 model_id=cfg.detector_model_id,
-                device=f"cuda:{detector_device}" if torch.cuda.is_available() else "cpu",
+                device=detector_device,
                 box_threshold=cfg.detector_box_threshold,
                 text_threshold=cfg.detector_text_threshold,
                 max_detections=cfg.max_object_tokens,
             )
+            self.detector_device = torch.device(detector_device)
         else:
             self.detector = None
+            self.detector_device = torch.device("cpu")
         self.latest_object_data: Dict[str, Dict[str, object]] = {}
 
     def _detect_boxes(
@@ -358,6 +361,29 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         adapted = adapted.reshape(combined.shape[0], combined.shape[1], -1)
         adapted = adapted * token_mask.unsqueeze(-1).float()
         return adapted, token_mask
+
+    @staticmethod
+    def _resolve_detector_device(requested: Optional[str]) -> torch.device:
+        if requested is None or requested == "":
+            requested = "auto"
+        requested_lower = requested.lower() if isinstance(requested, str) else str(requested)
+        if requested_lower in {"auto", "cuda:auto"}:
+            requested = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            device = torch.device(requested)
+        except (TypeError, RuntimeError):
+            warnings.warn(
+                f"Invalid detector device specification '{requested}', falling back to CPU.",
+                RuntimeWarning,
+            )
+            device = torch.device("cpu")
+        if device.type == "cuda" and not torch.cuda.is_available():
+            warnings.warn(
+                "CUDA requested for Grounding DINO but no GPU is available; using CPU instead.",
+                RuntimeWarning,
+            )
+            device = torch.device("cpu")
+        return device
 
     def _store_latest(
         self,
