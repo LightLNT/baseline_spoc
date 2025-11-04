@@ -20,6 +20,7 @@ from architecture.models.transformer_models.object_token_extractor import (
 from utils.bbox_utils import get_best_of_two_bboxes
 from utils.grounding_dino_utils import GroundingDINOPredictor
 from utils.sensor_constant_utils import is_a_visual_sensor
+from transformers import AutoTokenizer
 
 
 @dataclass
@@ -300,13 +301,19 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 max_detections=cfg.max_object_tokens,
             )
             self.detector_device = torch.device(detector_device)
+            # try to load a tokenizer for decoding training goal tokens into strings
+            try:
+                # cfg.text_encoder is usually like 't5-small'
+                self._goal_tokenizer = AutoTokenizer.from_pretrained(cfg.text_encoder)
+            except Exception:
+                self._goal_tokenizer = None
         else:
             self.detector = None
             self.detector_device = torch.device("cpu")
         self.latest_object_data: Dict[str, Dict[str, object]] = {}
 
     def _detect_boxes(
-        self, images: torch.Tensor
+        self, images: torch.Tensor, B: Optional[int] = None, T: Optional[int] = None, goals: Optional[dict] = None
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]]]:
         batch = images.shape[0]
         device = images.device
@@ -317,9 +324,30 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             return zeros_boxes, zeros_scores, empty_labels
 
         pil_inputs = [GroundingDINOPredictor._to_pil(img.detach().cpu()) for img in images]
+
+        # build text queries: prefer task goals decoded from tokenizer when available
+        per_image_texts = None
+        if goals is not None and getattr(self, "_goal_tokenizer", None) is not None and B is not None and T is not None:
+            try:
+                # goals is expected to be a dict with 'input_ids' (B x L)
+                input_ids = goals.get("input_ids", None)
+                if input_ids is not None:
+                    # decode to strings per batch element
+                    decoded = self._goal_tokenizer.batch_decode(input_ids.cpu().tolist(), skip_special_tokens=True)
+                    # expand per time-step so length matches images (B * T)
+                    per_image_texts = []
+                    for s in decoded:
+                        # if empty, fallback to detector_phrases
+                        if s is None or str(s).strip() == "":
+                            s = " ".join(self.cfg.detector_phrases)
+                        for _ in range(T):
+                            per_image_texts.append(s)
+            except Exception:
+                per_image_texts = None
+
         detections = self.detector(
             pil_inputs,
-            text_queries=self.cfg.detector_phrases,
+            text_queries=per_image_texts if per_image_texts is not None else self.cfg.detector_phrases,
             max_detections=self.cfg.max_object_tokens,
         )
 
@@ -456,7 +484,12 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 images_chw = (C, H, W)
             assert images_chw == (C, H, W)
             flattened = imgs.reshape(B * T, C, H, W)
-            boxes_list, scores_list, labels_list = self._detect_boxes(flattened)
+            boxes_list, scores_list, labels_list = self._detect_boxes(
+                flattened,
+                B=B,
+                T=T,
+                goals=goals,
+            )
             extracted = self.object_token_extractor(flattened, boxes_list, scores_list)
             sensor_tokens, token_mask = self._prepare_sensor_tokens(extracted)
             all_img_features[sensor] = sensor_tokens

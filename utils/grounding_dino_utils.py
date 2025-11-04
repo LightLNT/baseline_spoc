@@ -63,21 +63,51 @@ class GroundingDINOPredictor:
         text_threshold: Optional[float] = None,
         max_detections: Optional[int] = None,
     ) -> List[GroundingDINOResult]:
+        # Support either a single prompt (str), a sequence of phrases (old behavior),
+        # or a per-image list of prompts (len == len(images)).
+        per_image_prompts = None
+        global_prompt = None
+        global_phrases = None
         if isinstance(text_queries, str):
-            phrases = [phrase.strip() for phrase in text_queries.split(".") if phrase.strip()]
+            global_phrases = [phrase.strip() for phrase in text_queries.split(".") if phrase.strip()]
+            if len(global_phrases) == 0:
+                raise ValueError("text_queries must provide at least one phrase for detection.")
+            global_prompt = " . ".join(global_phrases) + "."
         else:
-            phrases = [str(phrase).strip() for phrase in text_queries if str(phrase).strip()]
-        if len(phrases) == 0:
-            raise ValueError("text_queries must provide at least one phrase for detection.")
-        prompt = " . ".join(phrases) + "."
+            # try sequence
+            text_list = list(text_queries)
+            if len(text_list) == len(images):
+                # per-image prompts
+                per_image_prompts = [str(tq) for tq in text_list]
+            else:
+                # combine sequence into global phrase list (old behavior)
+                global_phrases = [str(phrase).strip() for phrase in text_list if str(phrase).strip()]
+                if len(global_phrases) == 0:
+                    raise ValueError("text_queries must provide at least one phrase for detection.")
+                global_prompt = " . ".join(global_phrases) + "."
 
         box_threshold = self.box_threshold if box_threshold is None else box_threshold
         text_threshold = self.text_threshold if text_threshold is None else text_threshold
         max_detections = self.max_detections if max_detections is None else max_detections
 
         results: List[GroundingDINOResult] = []
-        for image in images:
+        # Precompute per-image phrase lists if needed
+        per_image_phrases = None
+        if per_image_prompts is not None:
+            per_image_phrases = [
+                [phrase.strip() for phrase in p.split(".") if phrase.strip()] if isinstance(p, str) else [str(p)]
+                for p in per_image_prompts
+            ]
+
+        for idx, image in enumerate(images):
             pil_image = self._to_pil(image)
+            if per_image_prompts is not None:
+                prompt = per_image_prompts[idx]
+                phrases = per_image_phrases[idx]
+            else:
+                prompt = global_prompt
+                phrases = global_phrases
+
             inputs = self.processor(images=pil_image, text=prompt, return_tensors="pt").to(self.device)
             with torch.no_grad():
                 outputs = self.model(**inputs)
@@ -102,6 +132,9 @@ class GroundingDINOPredictor:
                     labels_idx = labels_idx.detach().cpu().to(torch.int64)
                 else:
                     labels_idx = torch.tensor(labels_idx, dtype=torch.int64)
+                # ensure phrases is a list to avoid None indexing
+                if phrases is None:
+                    phrases = []
                 labels = [phrases[idx] if 0 <= idx < len(phrases) else "" for idx in labels_idx.tolist()]
 
             if scores.numel() == 0:
@@ -111,7 +144,7 @@ class GroundingDINOPredictor:
                         scores=torch.zeros(0, dtype=torch.float32),
                         labels=[],
                         boxes_absolute=torch.zeros((0, 4), dtype=torch.float32),
-                        image_size=pil_image.size[::-1],
+                        image_size=tuple(pil_image.size[::-1]),
                     )
                 )
                 continue
@@ -130,7 +163,7 @@ class GroundingDINOPredictor:
                         scores=torch.zeros(0, dtype=torch.float32),
                         labels=[],
                         boxes_absolute=torch.zeros((0, 4), dtype=torch.float32),
-                        image_size=pil_image.size[::-1],
+                        image_size=tuple(pil_image.size[::-1]),
                     )
                 )
                 continue
@@ -143,15 +176,17 @@ class GroundingDINOPredictor:
                 scores = topk_scores
 
             if labels_idx is not None:
+                if phrases is None:
+                    phrases = []
                 labels = [phrases[idx] if 0 <= idx < len(phrases) else "" for idx in labels_idx.tolist()]
-            boxes_normalized = self._normalize_boxes(boxes_absolute, pil_image.size[::-1])
+            boxes_normalized = self._normalize_boxes(boxes_absolute, tuple(pil_image.size[::-1]))
             results.append(
                 GroundingDINOResult(
                     boxes=boxes_normalized,
                     scores=scores,
                     labels=labels,
                     boxes_absolute=boxes_absolute,
-                    image_size=pil_image.size[::-1],
+                    image_size=tuple(pil_image.size[::-1]),
                 )
             )
         return results
