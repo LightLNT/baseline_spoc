@@ -1,8 +1,8 @@
 import math
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
-from dataclasses import dataclass
-from typing import List, Literal
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,8 +10,14 @@ from open_clip import create_model_from_pretrained
 from open_clip.transformer import TextTransformer
 from transformers import T5EncoderModel
 
-from architecture.models.transformer_models.image_encoders import IMAGE_ENCODERS
+from architecture.models.transformer_models.image_encoders import IMAGE_ENCODERS, Dinov2
+from architecture.models.transformer_models.object_token_extractor import (
+    ObjectTokenExtractionOutput,
+    ObjectTokenExtractor,
+    ObjectTokenExtractorConfig,
+)
 from utils.bbox_utils import get_best_of_two_bboxes
+from utils.grounding_dino_utils import GroundingDINOPredictor
 from utils.sensor_constant_utils import is_a_visual_sensor
 
 
@@ -50,6 +56,19 @@ class TextCondVisualEncoderConfig:
     fusion_xformer: TransformerConfig = TransformerConfig(3, 512, 8)
     input_sensors: List[str] = None
     bbox_encoding_type: Literal["positional"] = "positional"
+
+
+@dataclass
+class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
+    max_object_tokens: int = 10
+    detector_model_id: str = "IDEA-Research/grounding-dino-tiny"
+    detector_device: str = "cuda"
+    detector_box_threshold: float = 0.25
+    detector_text_threshold: float = 0.25
+    detector_phrases: Sequence[str] = field(default_factory=lambda: ["object"])
+    pooling: Literal["attention", "mean"] = "attention"
+    min_patch_overlap: int = 1
+    use_detector: bool = True
 
 
 class TextCondMultiCameraVisualEncoder(nn.Module):
@@ -251,6 +270,170 @@ class TextCondMultiCameraVisualEncoderWDoubleDet(TextCondMultiCameraVisualEncode
         fused_feats = fused_feats[:, 0, :]  # BTxD
 
         return fused_feats.reshape(B, T, D), text_feats
+
+
+class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
+    def __init__(self, cfg: ObjectTokenVisualEncoderConfig):
+        super().__init__(cfg)
+        if not isinstance(self.image_encoder, Dinov2):
+            raise ValueError("ObjectTokenVisualEncoder currently supports Dinov2 image encoders only.")
+        self.cfg: ObjectTokenVisualEncoderConfig = cfg
+        extractor_cfg = ObjectTokenExtractorConfig(
+            max_object_tokens=cfg.max_object_tokens,
+            pooling=cfg.pooling,
+            min_patch_overlap=cfg.min_patch_overlap,
+        )
+        self.object_token_extractor = ObjectTokenExtractor(self.image_encoder, extractor_cfg)
+        self.visual_adapter = nn.Sequential(
+            nn.LayerNorm(self.image_encoder.cfg.output_size[0]),
+            nn.Linear(self.image_encoder.cfg.output_size[0], self.cfg.fusion_xformer.d_model),
+            nn.ReLU(),
+        )
+        if cfg.use_detector:
+            self.detector: Optional[GroundingDINOPredictor] = GroundingDINOPredictor(
+                model_id=cfg.detector_model_id,
+                device=cfg.detector_device,
+                box_threshold=cfg.detector_box_threshold,
+                text_threshold=cfg.detector_text_threshold,
+                max_detections=cfg.max_object_tokens,
+            )
+        else:
+            self.detector = None
+        self.latest_object_data: Dict[str, Dict[str, object]] = {}
+
+    def _detect_boxes(
+        self, images: torch.Tensor
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]]]:
+        batch = images.shape[0]
+        device = images.device
+        if self.detector is None:
+            zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
+            zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
+            empty_labels = [[] for _ in range(batch)]
+            return zeros_boxes, zeros_scores, empty_labels
+
+        pil_inputs = [GroundingDINOPredictor._to_pil(img.detach().cpu()) for img in images]
+        detections = self.detector(
+            pil_inputs,
+            text_queries=self.cfg.detector_phrases,
+            max_detections=self.cfg.max_object_tokens,
+        )
+
+        boxes_list: List[torch.Tensor] = []
+        scores_list: List[torch.Tensor] = []
+        labels_list: List[List[str]] = []
+        for det in detections:
+            boxes = det.boxes.to(device)
+            scores = det.scores.to(device)
+            labels = list(det.labels)
+            if boxes.shape[0] > self.cfg.max_object_tokens:
+                topk_scores, topk_idx = torch.topk(scores, self.cfg.max_object_tokens)
+                boxes = boxes[topk_idx]
+                labels = [labels[i] for i in topk_idx.tolist()]
+                scores = topk_scores
+            boxes_list.append(boxes)
+            scores_list.append(scores)
+            padded_labels = labels + ["" for _ in range(self.cfg.max_object_tokens - len(labels))]
+            labels_list.append(padded_labels)
+
+        return boxes_list, scores_list, labels_list
+
+    @staticmethod
+    def _reshape_bt(tensor: torch.Tensor, B: int, T: int):
+        return tensor.reshape(B, T, *tensor.shape[1:])
+
+    def _prepare_sensor_tokens(
+        self, extracted: ObjectTokenExtractionOutput
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cls_tokens = extracted.cls_tokens
+        object_tokens = extracted.object_tokens
+        combined = torch.cat([cls_tokens.unsqueeze(1), object_tokens], dim=1)
+        cls_mask = torch.ones(
+            (cls_tokens.shape[0], 1), dtype=torch.bool, device=combined.device
+        )
+        token_mask = torch.cat([cls_mask, extracted.object_mask], dim=1)
+        flat = combined.reshape(-1, combined.shape[-1])
+        adapted = self.visual_adapter(flat)
+        adapted = adapted.reshape(combined.shape[0], combined.shape[1], -1)
+        adapted = adapted * token_mask.unsqueeze(-1).float()
+        return adapted, token_mask
+
+    def _store_latest(
+        self,
+        sensor: str,
+        extracted: ObjectTokenExtractionOutput,
+        token_mask: torch.Tensor,
+        labels_list: List[List[str]],
+        B: int,
+        T: int,
+    ) -> None:
+        max_tokens = self.cfg.max_object_tokens
+        boxes = self._reshape_bt(extracted.boxes, B, T)
+        scores = self._reshape_bt(extracted.scores, B, T)
+        object_mask = self._reshape_bt(extracted.object_mask, B, T)
+        attention = self._reshape_bt(extracted.attention_maps, B, T)
+        token_mask_bt = self._reshape_bt(token_mask, B, T)
+        cls_tokens = self._reshape_bt(extracted.cls_tokens, B, T)
+
+        labels_nested: List[List[List[str]]] = []
+        idx = 0
+        for _b in range(B):
+            per_batch: List[List[str]] = []
+            for _t in range(T):
+                per_sample = ["[cls]"]
+                per_sample.extend(labels_list[idx])
+                valid_mask = token_mask_bt[_b, _t]
+                for label_idx, label in enumerate(per_sample):
+                    if label == "" and bool(valid_mask[label_idx]):
+                        if label_idx == 0:
+                            per_sample[label_idx] = "[cls]"
+                        else:
+                            per_sample[label_idx] = "[token]"
+                per_batch.append(per_sample)
+                idx += 1
+            labels_nested.append(per_batch)
+
+        self.latest_object_data[sensor] = {
+            "boxes": boxes,
+            "scores": scores,
+            "object_mask": object_mask,
+            "token_mask": token_mask_bt,
+            "attention": attention,
+            "labels": labels_nested,
+            "cls_tokens": cls_tokens,
+        }
+
+    def get_image_text_feats(self, frames, goals, text_feats):
+        all_img_features = {}
+        images_chw = None
+        self.latest_object_data = {}
+        for sensor in frames.keys():
+            assert is_a_visual_sensor(sensor)
+            imgs = frames[sensor]
+            B, T, C, H, W = imgs.shape
+            if images_chw is None:
+                images_chw = (C, H, W)
+            assert images_chw == (C, H, W)
+            flattened = imgs.reshape(B * T, C, H, W)
+            boxes_list, scores_list, labels_list = self._detect_boxes(flattened)
+            extracted = self.object_token_extractor(flattened, boxes_list, scores_list)
+            sensor_tokens, token_mask = self._prepare_sensor_tokens(extracted)
+            all_img_features[sensor] = sensor_tokens
+            self._store_latest(sensor, extracted, token_mask, labels_list, B, T)
+
+        concatenated_feats = []
+        for sensor in self.visual_sensors:
+            camera_token = getattr(self, f"visual_sensor_token_{sensor}")
+            concatenated_feats.append(all_img_features[sensor] + camera_token)
+
+        concatenated_feats = torch.cat(concatenated_feats, dim=1)
+
+        if text_feats is None:
+            text_feats = self.encode_text(goals)
+        B, L, D = text_feats.shape
+        text_feats_ = text_feats.unsqueeze(1).tile(1, T, 1, 1).reshape(B * T, L, D)
+        fusion_token = self.fusion_token.reshape(1, 1, D).tile(B * T, 1, 1)
+        return fusion_token, concatenated_feats, text_feats, text_feats_, B, T, D
 
 
 class PositionalEncoder(nn.Module):

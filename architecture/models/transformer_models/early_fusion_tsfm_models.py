@@ -19,6 +19,8 @@ from architecture.models.transformer_models.text_cond_visual_encoder import (
     TransformerConfig,
     TextCondMultiCameraVisualEncoderWDoubleDet,
     NonTxMultiCameraVisualEncoder,
+    ObjectTokenVisualEncoder,
+    ObjectTokenVisualEncoderConfig,
 )
 from training.offline.train_utils import load_pl_ckpt
 from utils.constants.stretch_initialization_utils import ALL_STRETCH_ACTIONS
@@ -53,6 +55,7 @@ class EarlyFusionCnnTransformer(nn.Module):
                 TextCondMultiCameraVisualEncoder,
                 TextCondMultiCameraVisualEncoderWDoubleDet,
                 NonTxMultiCameraVisualEncoder,
+                ObjectTokenVisualEncoder,
             ]
         }
 
@@ -256,6 +259,14 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.image_encoder = "Dinov2Small"
             model_cfg.visual_encoder.text_encoder = "t5-small"
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version in {"object_token_small", "object_token_dinov2_small"}:
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = ObjectTokenVisualEncoderConfig()
+            model_cfg.visual_encoder.image_encoder = "Dinov2Small"
+            model_cfg.visual_encoder.text_encoder = "t5-small"
+            model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
+            model_cfg.visual_encoder.input_sensors = input_sensors
             model_cfg.decoder = TransformerConfig(3, 512, 8)
         elif model_version == "siglip_large_3":
             model_cfg.visual_encoder.image_encoder = "SigLIPLarge"

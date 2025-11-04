@@ -1,5 +1,5 @@
 import copy
-from typing import Sequence, Dict, List, Optional
+from typing import Sequence, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -225,6 +225,104 @@ def get_top_down_path_view(
 def get_top_down_frame(controller, agent_path, target_ids):
     top_down = controller.get_top_down_path_view(agent_path, target_ids)
     return top_down
+
+
+def draw_grounding_dino_detections(
+    frame: np.ndarray,
+    boxes: Sequence[Sequence[float]],
+    labels: Optional[Sequence[str]] = None,
+    scores: Optional[Sequence[float]] = None,
+    inplace: bool = False,
+    normalized: bool = True,
+    color: Tuple[int, int, int] = (0, 255, 0),
+    thickness: int = 2,
+):
+    """Overlay Grounding DINO detections on a frame."""
+
+    if not inplace:
+        frame = copy.deepcopy(frame)
+
+    h, w, _ = frame.shape
+    boxes_px = []
+    for box in boxes:
+        if normalized:
+            x0, y0, x1, y1 = box
+            boxes_px.append([int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)])
+        else:
+            boxes_px.append([int(b) for b in box])
+
+    formatted_labels = None
+    if labels is not None or scores is not None:
+        formatted_labels = []
+        for idx in range(len(boxes_px)):
+            parts = []
+            if labels is not None and idx < len(labels):
+                parts.append(labels[idx])
+            if scores is not None and idx < len(scores):
+                parts.append(f"{scores[idx]:.2f}")
+            formatted_labels.append(" ".join(part for part in parts if part))
+
+    add_bboxes_to_frame(
+        frame,
+        boxes_px,
+        formatted_labels,
+        inplace=True,
+        colors=[color for _ in boxes_px],
+        thinkness=thickness,
+    )
+    return frame
+
+
+def shade_object_region(
+    frame: np.ndarray,
+    box: Sequence[float],
+    color: Tuple[int, int, int] = (255, 255, 0),
+    alpha: float = 0.3,
+    normalized: bool = True,
+    inplace: bool = False,
+):
+    """Shade the region corresponding to an object token."""
+
+    if not inplace:
+        frame = copy.deepcopy(frame)
+
+    overlay = frame.copy()
+    h, w, _ = frame.shape
+    if normalized:
+        x0, y0, x1, y1 = box
+        x0, y0, x1, y1 = int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)
+    else:
+        x0, y0, x1, y1 = [int(b) for b in box]
+
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), color, -1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    return frame
+
+
+def overlay_object_token_attention(
+    frame: np.ndarray,
+    attention: Sequence[float],
+    grid_size: Tuple[int, int],
+    alpha: float = 0.4,
+    inplace: bool = False,
+    colormap: int = cv2.COLORMAP_JET,
+):
+    """Overlay a heatmap representing object-token attention weights."""
+
+    if not inplace:
+        frame = copy.deepcopy(frame)
+
+    attn = np.array(attention, dtype=np.float32)
+    if attn.size != grid_size[0] * grid_size[1]:
+        raise ValueError("Attention map size does not match grid dimensions.")
+    if attn.max() > 0:
+        attn = attn / (attn.max() + 1e-8)
+    attn = attn.reshape(grid_size)
+    attn = cv2.resize(attn, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_CUBIC)
+    heatmap = (attn * 255).astype(np.uint8)
+    heatmap = cv2.applyColorMap(heatmap, colormap)
+    cv2.addWeighted(heatmap, alpha, frame, 1 - alpha, 0, frame)
+    return frame
 
 
 class VideoLogging:

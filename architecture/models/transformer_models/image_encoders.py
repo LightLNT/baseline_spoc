@@ -1,5 +1,6 @@
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import clip
 import torch
@@ -51,6 +52,10 @@ class ClipResNet(nn.Module):
 class Dinov2Config:
     model: str = "dinov2_vits14"
     output_size: Tuple[int, int, int] = (384, 7, 12)
+    input_size: Tuple[int, int] = (224, 384)
+    patch_grid: Tuple[int, int] = (16, 27)
+    width_crop: int = 3
+    detach_features: bool = True
 
 
 class Dinov2(nn.Module):
@@ -61,15 +66,40 @@ class Dinov2(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(cfg.output_size[1:])
         self.eval()
 
+    def _prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.shape[-2:] == tuple(self.cfg.input_size), (
+            f"Expected shape is {self.cfg.input_size}; got {x.shape}"
+        )
+        if self.cfg.width_crop > 0:
+            return x[:, :, :, self.cfg.width_crop : -self.cfg.width_crop]
+        return x
+
+    def _forward_features(self, x: torch.Tensor, detach: Optional[bool] = None):
+        should_detach = self.cfg.detach_features if detach is None else detach
+        ctx = torch.no_grad() if should_detach else nullcontext()
+        with ctx:
+            inputs = self._prepare_inputs(x)
+            features = self.model.forward_features(inputs)
+        return features
+
+    def forward_patch_tokens(self, x: torch.Tensor, detach: Optional[bool] = None):
+        features = self._forward_features(x, detach=detach)
+        patch_tokens = features["x_norm_patchtokens"]
+        cls_token = features.get("x_norm_clstoken")
+        return cls_token, patch_tokens
+
     def forward(self, x):
-        assert x.shape[-2:] == (224, 384), f"Expected shape is 224x384; got {x.shape}"
-        with torch.no_grad():
-            x = self.model.forward_features(x[:, :, :, 3:-3])["x_norm_patchtokens"]
-            B, _, D = x.shape  # Bx432x384
-            x = x.permute(0, 2, 1)  # Bx384x432
-            x = x.reshape(B, D, 16, 27)
-            x = self.pool(x)
-            return x
+        cls_token, patch_tokens = self.forward_patch_tokens(x, detach=True)
+        del cls_token  # cls token is unused for the pooled output
+        B, _, D = patch_tokens.shape
+        grid_h, grid_w = self.cfg.patch_grid
+        assert grid_h * grid_w == patch_tokens.shape[1], (
+            f"Expected {grid_h * grid_w} patch tokens, got {patch_tokens.shape[1]}"
+        )
+        patch_tokens = patch_tokens.permute(0, 2, 1)
+        patch_tokens = patch_tokens.reshape(B, D, grid_h, grid_w)
+        patch_tokens = self.pool(patch_tokens)
+        return patch_tokens
 
 
 @dataclass
