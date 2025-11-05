@@ -5,7 +5,7 @@ import warnings
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -348,15 +348,22 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         self.latest_object_data: Dict[str, Dict[str, object]] = {}
 
     def _detect_boxes(
-        self, images: torch.Tensor, B: Optional[int] = None, T: Optional[int] = None, goals: Optional[dict] = None
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]]]:
+        self,
+        images: torch.Tensor,
+        B: Optional[int] = None,
+        T: Optional[int] = None,
+        goals: Optional[dict] = None,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]], Dict[str, Any]]:
         batch = images.shape[0]
         device = images.device
         if self.detector is None:
             zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
             zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
             empty_labels = [[] for _ in range(batch)]
-            return zeros_boxes, zeros_scores, empty_labels
+            return zeros_boxes, zeros_scores, empty_labels, {
+                "vocabulary": [],
+                "per_image_allowed": [],
+            }
 
         goal_texts = self._decode_goal_strings(goals, B, T)
         vocabulary, per_image_allowed = self._build_detector_vocabulary(goal_texts, batch)
@@ -373,7 +380,10 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
             zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
             empty_labels = [[] for _ in range(batch)]
-            return zeros_boxes, zeros_scores, empty_labels
+            return zeros_boxes, zeros_scores, empty_labels, {
+                "vocabulary": list(vocabulary),
+                "per_image_allowed": per_image_allowed,
+            }
 
         boxes_list: List[torch.Tensor] = []
         scores_list: List[torch.Tensor] = []
@@ -424,7 +434,10 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             padded_labels = labels + ["" for _ in range(self.cfg.max_object_tokens - len(labels))]
             labels_list.append(padded_labels)
 
-        return boxes_list, scores_list, labels_list
+        return boxes_list, scores_list, labels_list, {
+            "vocabulary": list(self.detector.vocabulary),
+            "per_image_allowed": per_image_allowed,
+        }
 
     def _decode_goal_strings(
         self,
@@ -578,6 +591,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         labels_list: List[List[str]],
         B: int,
         T: int,
+        detector_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         max_tokens = self.cfg.max_object_tokens
         boxes = self._reshape_bt(extracted.boxes, B, T)
@@ -605,6 +619,31 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 idx += 1
             labels_nested.append(per_batch)
 
+        detector_info: Optional[Dict[str, Any]] = None
+        if detector_meta is not None:
+            vocabulary = detector_meta.get("vocabulary") or []
+            per_image_allowed = detector_meta.get("per_image_allowed") or []
+            formatted_allowed: List[List[List[str]]] = []
+            flat_idx = 0
+            for _b in range(B):
+                per_batch: List[List[str]] = []
+                for _t in range(T):
+                    if flat_idx < len(per_image_allowed):
+                        allowed_items = per_image_allowed[flat_idx]
+                        if isinstance(allowed_items, (set, list, tuple)):
+                            per_batch.append(sorted(list(allowed_items)))
+                        else:
+                            per_batch.append([str(allowed_items)])
+                    else:
+                        per_batch.append([])
+                    flat_idx += 1
+                formatted_allowed.append(per_batch)
+
+            detector_info = {
+                "vocabulary": list(vocabulary),
+                "per_image_allowed": formatted_allowed,
+            }
+
         self.latest_object_data[sensor] = {
             "boxes": boxes,
             "scores": scores,
@@ -613,6 +652,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             "attention": attention,
             "labels": labels_nested,
             "cls_tokens": cls_tokens,
+            "detector_meta": detector_info,
         }
 
     def get_image_text_feats(self, frames, goals, text_feats):
@@ -627,7 +667,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 images_chw = (C, H, W)
             assert images_chw == (C, H, W)
             flattened = imgs.reshape(B * T, C, H, W)
-            boxes_list, scores_list, labels_list = self._detect_boxes(
+            boxes_list, scores_list, labels_list, detector_meta = self._detect_boxes(
                 flattened,
                 B=B,
                 T=T,
@@ -636,7 +676,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             extracted = self.object_token_extractor(flattened, boxes_list, scores_list)
             sensor_tokens, token_mask = self._prepare_sensor_tokens(extracted)
             all_img_features[sensor] = sensor_tokens
-            self._store_latest(sensor, extracted, token_mask, labels_list, B, T)
+            self._store_latest(sensor, extracted, token_mask, labels_list, B, T, detector_meta)
 
         concatenated_feats = []
         for sensor in self.visual_sensors:

@@ -348,7 +348,7 @@ class LitModel(pl.LightningModule):
         max_batches = max(1, int(self.visual_debug_max_batch))
         max_timesteps = max(1, int(self.visual_debug_max_timestep))
 
-        for sensor, sensor_frames in frames_cpu.items():
+        for sensor, _ in frames_cpu.items():
             sensor_data = latest_object_data.get(sensor)
             if sensor_data is None:
                 logs.append(
@@ -360,6 +360,13 @@ class LitModel(pl.LightningModule):
                     }
                 )
                 continue
+
+            detector_meta = sensor_data.get("detector_meta") if isinstance(sensor_data, dict) else None
+            detector_vocab = None
+            detector_allowed = None
+            if isinstance(detector_meta, dict):
+                detector_vocab = detector_meta.get("vocabulary")
+                detector_allowed = detector_meta.get("per_image_allowed")
 
             boxes = sensor_data.get("boxes")
             object_mask = sensor_data.get("object_mask")
@@ -437,6 +444,12 @@ class LitModel(pl.LightningModule):
                         record["status"] = "scores_missing"
                     elif not detections:
                         record.setdefault("status", "no_active_detections")
+                    if detector_vocab:
+                        record["detector_vocabulary"] = list(detector_vocab)
+                    if detector_allowed and b < len(detector_allowed):
+                        allowed_seq = detector_allowed[b]
+                        if isinstance(allowed_seq, (list, tuple)) and t < len(allowed_seq):
+                            record["detector_allowed"] = list(allowed_seq[t])
                     logs.append(record)
 
         return logs
