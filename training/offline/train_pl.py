@@ -19,6 +19,8 @@ from online_evaluation.local_logging_utils import LocalWandbLogger
 from training.offline.chores_dataset import ChoresMultitaskDataset
 from training.offline.dataset_mixtures import get_mixture_by_name
 from training.offline.train_utils import get_latest_local_ckpt_pth
+from utils.object_token_debug import render_object_token_batch
+from utils.sensor_constant_utils import is_a_non_visual_sensor, is_a_visual_sensor
 
 
 def arg_parser_for_offline_training():
@@ -63,6 +65,24 @@ def arg_parser_for_offline_training():
         nargs="+",
         default=["raw_navigation_camera", "raw_manipulation_camera"],
     )
+    parser.add_argument(
+        "--visualize_object_tokens",
+        type=str2bool,
+        default=False,
+        help="If true, render object-token visualizations once per training epoch (rank 0 only).",
+    )
+    parser.add_argument(
+        "--visual_debug_max_batch",
+        type=int,
+        default=2,
+        help="Max number of batch elements to render when visualizing object tokens.",
+    )
+    parser.add_argument(
+        "--visual_debug_max_timestep",
+        type=int,
+        default=4,
+        help="Max number of timesteps per sample to render during visualization.",
+    )
     return parser
 
 
@@ -91,10 +111,17 @@ class LitModel(pl.LightningModule):
         self.num_frames = 0
         self.frames_metric = SumMetric()
         self.log_video_every = args.log_video_every
+        self.visualize_object_tokens = bool(args.visualize_object_tokens)
+        self.visual_debug_max_batch = args.visual_debug_max_batch
+        self.visual_debug_max_timestep = args.visual_debug_max_timestep
+        self.visual_debug_output_dir = os.path.join(args.output_dir, "object_token_debug")
+        self._visual_mean_std = self._extract_image_stats()
+        self._visual_debug_cache = None
 
     def on_fit_start(self):
         self.preproc.device = self.device
         self.frames_metric.reset()
+        self._visual_debug_cache = None
 
     def log_videos(self, batch, outputs, train_or_val):
         items_to_log = random.choices(range(len(batch)), k=min(10, len(batch)))
@@ -130,6 +157,153 @@ class LitModel(pl.LightningModule):
                 data=data,
             )
 
+    def _extract_image_stats(self):
+        default_mean = (0.48145466, 0.4578275, 0.40821073)
+        default_std = (0.26862954, 0.26130258, 0.27577711)
+        try:
+            transforms = getattr(self.preproc.image_preprocessor, "transforms", None)
+        except Exception:
+            transforms = None
+        if transforms:
+            for transform in reversed(transforms):
+                if hasattr(transform, "mean") and hasattr(transform, "std"):
+                    try:
+                        mean = tuple(float(m) for m in transform.mean)
+                        std = tuple(float(s) for s in transform.std)
+                        return mean, std
+                    except TypeError:
+                        continue
+        return default_mean, default_std
+
+    def _cache_visual_debug_batch(self, proc_batch):
+        if not self.visualize_object_tokens:
+            return
+        if self.trainer is not None:
+            if not self.trainer.is_global_zero:
+                return
+            if getattr(self.trainer, "sanity_checking", False):
+                return
+        if not hasattr(self.model.visual_encoder, "latest_object_data"):
+            return
+        if self._visual_debug_cache is not None:
+            return
+
+        frames = {}
+        for sensor, tensor in proc_batch.items():
+            if is_a_visual_sensor(sensor) and torch.is_tensor(tensor):
+                frames[sensor] = tensor.detach().cpu()
+
+        if not frames:
+            return
+
+        max_batch = max(1, int(self.visual_debug_max_batch))
+        # Limit cached tensors to the configured batch budget to control memory usage.
+        for sensor in list(frames.keys()):
+            frames[sensor] = frames[sensor][:max_batch].clone()
+
+        non_visual = {}
+        for sensor, tensor in proc_batch.items():
+            if is_a_non_visual_sensor(sensor) and torch.is_tensor(tensor):
+                non_visual[sensor] = tensor.detach().cpu()
+
+        for sensor in list(non_visual.keys()):
+            non_visual[sensor] = non_visual[sensor][:max_batch].clone()
+
+        goal_key = self.preproc.cfg.goal_sensor_uuid
+        goals_val = proc_batch.get(goal_key)
+        if isinstance(goals_val, dict):
+            goals = {
+                k: v.detach().cpu()[:max_batch].clone()
+                for k, v in goals_val.items()
+                if torch.is_tensor(v)
+            }
+        elif torch.is_tensor(goals_val):
+            goals = goals_val.detach().cpu()[:max_batch].clone()
+        else:
+            goals = None
+
+        self._visual_debug_cache = {
+            "frames": frames,
+            "non_visual": non_visual,
+            "goals": goals,
+            "train_step": int(self.train_steps),
+        }
+
+    def _render_visual_debug(self, epoch_idx: int):
+        if not self.visualize_object_tokens or self._visual_debug_cache is None:
+            return
+        if self.trainer is not None:
+            if not self.trainer.is_global_zero:
+                self._visual_debug_cache = None
+                return
+            if getattr(self.trainer, "sanity_checking", False):
+                self._visual_debug_cache = None
+                return
+        if not hasattr(self.model.visual_encoder, "latest_object_data"):
+            self._visual_debug_cache = None
+            return
+
+        cache = self._visual_debug_cache
+        frames_cpu = cache["frames"]
+        if not frames_cpu:
+            self._visual_debug_cache = None
+            return
+
+        frames_device = {k: v.to(self.device) for k, v in frames_cpu.items()}
+        non_visual_cpu = cache["non_visual"]
+        non_visual_device = {k: v.to(self.device) for k, v in non_visual_cpu.items()}
+        goals_cpu = cache["goals"]
+        if isinstance(goals_cpu, dict):
+            goals_device = {k: v.to(self.device) for k, v in goals_cpu.items()}
+        elif torch.is_tensor(goals_cpu):
+            goals_device = goals_cpu.to(self.device)
+        else:
+            goals_device = goals_cpu
+
+        if goals_device is None:
+            self._visual_debug_cache = None
+            return
+
+        with torch.no_grad():
+            # Re-run the visual encoder to populate latest_object_data for visualization.
+            self.model.visual_encoder(
+                frames_device,
+                goals_device,
+                text_feats=None,
+                non_visual_sensors=non_visual_device if non_visual_device else None,
+            )
+
+        image_cfg = getattr(self.model.visual_encoder.image_encoder, "cfg", None)
+        if image_cfg is not None and hasattr(image_cfg, "patch_grid"):
+            patch_grid = image_cfg.patch_grid
+        elif image_cfg is not None and hasattr(image_cfg, "output_size"):
+            patch_grid = image_cfg.output_size[1:]
+        else:
+            patch_grid = (16, 27)
+
+        epoch_dir = os.path.join(
+            self.visual_debug_output_dir,
+            f"epoch_{epoch_idx:04d}",
+        )
+        os.makedirs(epoch_dir, exist_ok=True)
+        mean, std = self._visual_mean_std
+        train_step = cache.get("train_step", int(self.train_steps))
+
+        render_object_token_batch(
+            frames=frames_cpu,
+            latest_object_data=self.model.visual_encoder.latest_object_data,
+            output_dir=epoch_dir,
+            patch_grid=patch_grid,
+            prefix=f"epoch{epoch_idx:04d}_step{train_step:06d}",
+            mean=mean,
+            std=std,
+            max_batches=self.visual_debug_max_batch,
+            max_timesteps=self.visual_debug_max_timestep,
+            overlay_attention=True,
+        )
+
+        self._visual_debug_cache = None
+
     def forward_batch(self, batch):
         if len(batch) == 0:
             from utils.debug_utils import ForkedPdb
@@ -143,6 +317,7 @@ class LitModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self.train_steps += 1
         outputs, proc_batch = self.forward_batch(batch)
+        self._cache_visual_debug_batch(proc_batch)
         self.frames_metric.update(proc_batch["lengths"])
         train_frames = 0
         if self.train_steps % 10 == 0:
@@ -172,6 +347,20 @@ class LitModel(pl.LightningModule):
         if self.train_steps % self.log_video_every == 0:
             self.log_videos(batch, outputs, "train")
         return outputs
+
+    def on_train_epoch_end(self) -> None:
+        if not self.visualize_object_tokens:
+            return
+        if self.trainer is not None:
+            if not self.trainer.is_global_zero:
+                self._visual_debug_cache = None
+                return
+            if getattr(self.trainer, "sanity_checking", False):
+                self._visual_debug_cache = None
+                return
+        os.makedirs(self.visual_debug_output_dir, exist_ok=True)
+        epoch_idx = int(getattr(self, "current_epoch", 0))
+        self._render_visual_debug(epoch_idx)
 
     def get_metrics(self):
         metrics = dict()
