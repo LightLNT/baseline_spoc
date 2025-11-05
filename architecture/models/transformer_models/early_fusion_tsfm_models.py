@@ -269,7 +269,7 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.text_encoder = "t5-small"
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
             model_cfg.visual_encoder.input_sensors = input_sensors
-            detector_device_env = os.environ.get("GROUNDING_DINO_DEVICE")
+            detector_device_env = os.environ.get("DETIC_DEVICE") or os.environ.get("GROUNDING_DINO_DEVICE")
             if detector_device_env:
                 model_cfg.visual_encoder.detector_device = detector_device_env
             model_cfg.decoder = TransformerConfig(3, 512, 8)

@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import math
 import warnings
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,7 +20,7 @@ from architecture.models.transformer_models.object_token_extractor import (
     ObjectTokenExtractorConfig,
 )
 from utils.bbox_utils import get_best_of_two_bboxes
-from utils.grounding_dino_utils import GroundingDINOPredictor
+from utils.detic_utils import DeticPredictor
 from utils.sensor_constant_utils import is_a_visual_sensor
 from transformers import AutoTokenizer
 
@@ -63,14 +65,22 @@ class TextCondVisualEncoderConfig:
 @dataclass
 class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     max_object_tokens: int = 10
-    detector_model_id: str = "IDEA-Research/grounding-dino-tiny"
+    detector_config_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+    detector_weights_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+    detector_prompt: str = "a "
     detector_device: str = "cuda"
-    detector_box_threshold: float = 0.25
-    detector_text_threshold: float = 0.25
+    detector_confidence_threshold: Optional[float] = None
+    detector_min_size_test: Optional[int] = None
+    detector_max_size_test: Optional[int] = None
     detector_phrases: Sequence[str] = field(default_factory=lambda: ["object"])
+    max_detector_vocabulary: int = 128
     pooling: Literal["attention", "mean"] = "attention"
     min_patch_overlap: int = 1
     use_detector: bool = True
+    # legacy fields kept for backward compatibility and gracefully ignored when Detic is used
+    detector_model_id: Optional[str] = None
+    detector_box_threshold: float = 0.25
+    detector_text_threshold: float = 0.25
 
 
 class TextCondMultiCameraVisualEncoder(nn.Module):
@@ -291,25 +301,50 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             nn.Linear(self.image_encoder.cfg.output_size[0], self.cfg.fusion_xformer.d_model),
             nn.ReLU(),
         )
+        self.detector: Optional[DeticPredictor] = None
+        self.detector_device = torch.device("cpu")
+        self._goal_tokenizer = None
         if cfg.use_detector:
+            if cfg.detector_model_id:
+                warnings.warn(
+                    "detector_model_id is deprecated; Detic uses detector_config_file/detector_weights_file.",
+                    RuntimeWarning,
+                )
             detector_device = self._resolve_detector_device(cfg.detector_device)
-            self.detector: Optional[GroundingDINOPredictor] = GroundingDINOPredictor(
-                model_id=cfg.detector_model_id,
-                device=detector_device,
-                box_threshold=cfg.detector_box_threshold,
-                text_threshold=cfg.detector_text_threshold,
-                max_detections=cfg.max_object_tokens,
+            confidence_threshold = (
+                cfg.detector_confidence_threshold
+                if cfg.detector_confidence_threshold is not None
+                else cfg.detector_box_threshold
             )
-            self.detector_device = torch.device(detector_device)
-            # try to load a tokenizer for decoding training goal tokens into strings
+            initial_vocabulary = self._normalize_detector_phrases(cfg.detector_phrases)
+            if not initial_vocabulary:
+                initial_vocabulary = ["object"]
             try:
-                # cfg.text_encoder is usually like 't5-small'
-                self._goal_tokenizer = AutoTokenizer.from_pretrained(cfg.text_encoder)
-            except Exception:
-                self._goal_tokenizer = None
-        else:
-            self.detector = None
-            self.detector_device = torch.device("cpu")
+                self.detector = DeticPredictor(
+                    vocabulary=initial_vocabulary,
+                    prompt=cfg.detector_prompt,
+                    config_file=cfg.detector_config_file,
+                    model_weights_file=cfg.detector_weights_file,
+                    min_size_test=cfg.detector_min_size_test,
+                    max_size_test=cfg.detector_max_size_test,
+                    confidence_threshold=confidence_threshold,
+                    device=str(detector_device),
+                )
+                self.detector.to(detector_device)
+                self.detector_device = detector_device
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to initialize DeticPredictor ({exc}); continuing without detector.",
+                    RuntimeWarning,
+                )
+                self.detector = None
+                self.detector_device = torch.device("cpu")
+
+            if self.detector is not None:
+                try:
+                    self._goal_tokenizer = AutoTokenizer.from_pretrained(cfg.text_encoder)
+                except Exception:
+                    self._goal_tokenizer = None
         self.latest_object_data: Dict[str, Dict[str, object]] = {}
 
     def _detect_boxes(
@@ -323,52 +358,160 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             empty_labels = [[] for _ in range(batch)]
             return zeros_boxes, zeros_scores, empty_labels
 
-        pil_inputs = [GroundingDINOPredictor._to_pil(img.detach().cpu()) for img in images]
+        goal_texts = self._decode_goal_strings(goals, B, T)
+        vocabulary, per_image_allowed = self._build_detector_vocabulary(goal_texts, batch)
+        try:
+            self.detector.vocabulary = vocabulary
+        except Exception as exc:
+            warnings.warn(f"Failed to update Detic vocabulary ({exc}); retaining previous vocabulary.", RuntimeWarning)
 
-        # build text queries: prefer task goals decoded from tokenizer when available
-        per_image_texts = None
-        if goals is not None and getattr(self, "_goal_tokenizer", None) is not None and B is not None and T is not None:
-            try:
-                # goals is expected to be a dict with 'input_ids' (B x L)
-                input_ids = goals.get("input_ids", None)
-                if input_ids is not None:
-                    # decode to strings per batch element
-                    decoded = self._goal_tokenizer.batch_decode(input_ids.cpu().tolist(), skip_special_tokens=True)
-                    # expand per time-step so length matches images (B * T)
-                    per_image_texts = []
-                    for s in decoded:
-                        # if empty, fallback to detector_phrases
-                        if s is None or str(s).strip() == "":
-                            s = " ".join(self.cfg.detector_phrases)
-                        for _ in range(T):
-                            per_image_texts.append(s)
-            except Exception:
-                per_image_texts = None
-
-        detections = self.detector(
-            pil_inputs,
-            text_queries=per_image_texts if per_image_texts is not None else self.cfg.detector_phrases,
-            max_detections=self.cfg.max_object_tokens,
-        )
+        detector_inputs = images.detach().to(self.detector_device, dtype=torch.float32)
+        try:
+            detections = self.detector(detector_inputs)
+        except Exception as exc:
+            warnings.warn(f"Detic inference failed ({exc}); returning empty detections.", RuntimeWarning)
+            zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
+            zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
+            empty_labels = [[] for _ in range(batch)]
+            return zeros_boxes, zeros_scores, empty_labels
 
         boxes_list: List[torch.Tensor] = []
         scores_list: List[torch.Tensor] = []
         labels_list: List[List[str]] = []
-        for det in detections:
-            boxes = det.boxes.to(device)
-            scores = det.scores.to(device)
-            labels = list(det.labels)
+        vocabulary_set = set(self.detector.vocabulary)
+        for idx, det in enumerate(detections):
+            instances = det.get("instances", None) if isinstance(det, dict) else None
+            if instances is None or len(instances) == 0:
+                boxes_list.append(torch.zeros((0, 4), dtype=torch.float32, device=device))
+                scores_list.append(torch.zeros(0, dtype=torch.float32, device=device))
+                labels_list.append(["" for _ in range(self.cfg.max_object_tokens)])
+                continue
+
+            instances = instances.to("cpu")
+            boxes = instances.pred_boxes.tensor.detach().clone()
+            scores = instances.scores.detach().clone()
+            classes = instances.pred_classes.detach().clone().to(torch.int64)
+            labels = [self.detector.vocabulary[int(cls)] for cls in classes.tolist() if 0 <= int(cls) < len(self.detector.vocabulary)]
+
+            allowed_labels = per_image_allowed[idx] if idx < len(per_image_allowed) else vocabulary_set
+            filtered_indices: List[int] = [i for i, label in enumerate(labels) if label in allowed_labels]
+            if filtered_indices:
+                boxes = boxes[filtered_indices]
+                scores = scores[filtered_indices]
+                labels = [labels[i] for i in filtered_indices]
+            else:
+                boxes = boxes[:0]
+                scores = scores[:0]
+                labels = []
+
+            if boxes.numel() > 0:
+                image_height, image_width = instances.image_size
+                scale = torch.tensor(
+                    [1.0 / float(image_width), 1.0 / float(image_height), 1.0 / float(image_width), 1.0 / float(image_height)],
+                    dtype=torch.float32,
+                )
+                boxes = boxes * scale
+                boxes = boxes.clamp(0.0, 1.0)
+
             if boxes.shape[0] > self.cfg.max_object_tokens:
                 topk_scores, topk_idx = torch.topk(scores, self.cfg.max_object_tokens)
                 boxes = boxes[topk_idx]
-                labels = [labels[i] for i in topk_idx.tolist()]
                 scores = topk_scores
-            boxes_list.append(boxes)
-            scores_list.append(scores)
+                labels = [labels[i] for i in topk_idx.tolist()]
+
+            boxes_list.append(boxes.to(device=device, dtype=torch.float32))
+            scores_list.append(scores.to(device=device, dtype=torch.float32))
             padded_labels = labels + ["" for _ in range(self.cfg.max_object_tokens - len(labels))]
             labels_list.append(padded_labels)
 
         return boxes_list, scores_list, labels_list
+
+    def _decode_goal_strings(
+        self,
+        goals: Optional[dict],
+        B: Optional[int],
+        T: Optional[int],
+    ) -> Optional[List[str]]:
+        if (
+            goals is None
+            or self._goal_tokenizer is None
+            or B is None
+            or T is None
+            or "input_ids" not in goals
+        ):
+            return None
+
+        input_ids = goals["input_ids"]
+        try:
+            decoded = self._goal_tokenizer.batch_decode(
+                input_ids.detach().cpu().tolist(), skip_special_tokens=True
+            )
+        except Exception:
+            return None
+
+        per_image_texts: List[str] = []
+        for text in decoded:
+            cleaned = text.strip() if isinstance(text, str) else ""
+            for _ in range(T):
+                per_image_texts.append(cleaned)
+        return per_image_texts if per_image_texts else None
+
+    def _build_detector_vocabulary(
+        self,
+        goal_texts: Optional[List[str]],
+        batch: int,
+    ) -> Tuple[List[str], List[Set[str]]]:
+        base_phrases = self._normalize_detector_phrases(self.cfg.detector_phrases)
+        if not base_phrases:
+            base_phrases = ["object"]
+
+        cleaned_goal_texts: List[str] = []
+        if goal_texts is not None:
+            for text in goal_texts:
+                cleaned_goal_texts.append(text.strip() if isinstance(text, str) else "")
+        candidate_phrases = base_phrases + [t for t in cleaned_goal_texts if t]
+
+        unique_vocab: List[str] = []
+        seen: Set[str] = set()
+        max_vocab = getattr(self.cfg, "max_detector_vocabulary", 128) or 128
+        for phrase in candidate_phrases:
+            if phrase in seen:
+                continue
+            unique_vocab.append(phrase)
+            seen.add(phrase)
+            if len(unique_vocab) >= max_vocab:
+                break
+
+        if not unique_vocab:
+            unique_vocab = ["object"]
+            seen = {"object"}
+
+        per_image_allowed: List[Set[str]] = []
+        for idx in range(batch):
+            allowed = set(base_phrases)
+            if cleaned_goal_texts and idx < len(cleaned_goal_texts):
+                goal_phrase = cleaned_goal_texts[idx]
+                if goal_phrase:
+                    allowed.add(goal_phrase)
+            allowed = {phrase for phrase in allowed if phrase in seen}
+            if not allowed:
+                allowed = set(unique_vocab)
+            per_image_allowed.append(allowed)
+
+        return unique_vocab, per_image_allowed
+
+    @staticmethod
+    def _normalize_detector_phrases(phrases: Optional[Sequence[str]]) -> List[str]:
+        if phrases is None:
+            return []
+        normalized: List[str] = []
+        for phrase in phrases:
+            if not isinstance(phrase, str):
+                continue
+            cleaned = phrase.strip()
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized
 
     @staticmethod
     def _reshape_bt(tensor: torch.Tensor, B: int, T: int):
@@ -420,7 +563,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
 
         if device.type == "cuda" and not torch.cuda.is_available():
             warnings.warn(
-                "CUDA requested for Grounding DINO but no GPU is available; using CPU instead.",
+                "CUDA requested for Detic but no GPU is available; using CPU instead.",
                 RuntimeWarning,
             )
             device = torch.device("cpu")
