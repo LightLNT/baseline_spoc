@@ -1,8 +1,9 @@
 import argparse
+import json
 import os
 import random
 import warnings
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -175,7 +176,11 @@ class LitModel(pl.LightningModule):
                         continue
         return default_mean, default_std
 
-    def _cache_visual_debug_batch(self, proc_batch):
+    def _cache_visual_debug_batch(
+        self,
+        proc_batch,
+        raw_batch: Optional[Sequence[Mapping[str, Any]]] = None,
+    ):
         if not self.visualize_object_tokens:
             return
         if self.trainer is not None:
@@ -209,6 +214,17 @@ class LitModel(pl.LightningModule):
         for sensor in list(non_visual.keys()):
             non_visual[sensor] = non_visual[sensor][:max_batch].clone()
 
+        tasks = None
+        if raw_batch is not None:
+            tasks = []
+            for sample in raw_batch[:max_batch]:
+                goal_text = None
+                if isinstance(sample, Mapping):
+                    observations = sample.get("observations")
+                    if isinstance(observations, Mapping):
+                        goal_text = observations.get("goal")
+                tasks.append(goal_text)
+
         goal_key = self.preproc.cfg.goal_sensor_uuid
         goals_val = proc_batch.get(goal_key)
         if isinstance(goals_val, dict):
@@ -227,6 +243,7 @@ class LitModel(pl.LightningModule):
             "non_visual": non_visual,
             "goals": goals,
             "train_step": int(self.train_steps),
+            "tasks": tasks,
         }
 
     def _render_visual_debug(self, epoch_idx: int):
@@ -288,6 +305,20 @@ class LitModel(pl.LightningModule):
         os.makedirs(epoch_dir, exist_ok=True)
         mean, std = self._visual_mean_std
         train_step = cache.get("train_step", int(self.train_steps))
+        tasks = cache.get("tasks")
+
+        log_records = self._collect_visual_debug_logs(
+            latest_object_data=self.model.visual_encoder.latest_object_data,
+            frames_cpu=frames_cpu,
+            tasks=tasks,
+            epoch_idx=epoch_idx,
+            train_step=train_step,
+        )
+        if log_records:
+            log_path = os.path.join(epoch_dir, "detic_predictions.jsonl")
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                for record in log_records:
+                    log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         render_object_token_batch(
             frames=frames_cpu,
@@ -304,6 +335,112 @@ class LitModel(pl.LightningModule):
 
         self._visual_debug_cache = None
 
+    def _collect_visual_debug_logs(
+        self,
+        *,
+        latest_object_data: Dict[str, Dict[str, Any]],
+        frames_cpu: Dict[str, torch.Tensor],
+        tasks: Optional[Sequence[Any]],
+        epoch_idx: int,
+        train_step: int,
+    ) -> Sequence[Dict[str, Any]]:
+        logs: List[Dict[str, Any]] = []
+        max_batches = max(1, int(self.visual_debug_max_batch))
+        max_timesteps = max(1, int(self.visual_debug_max_timestep))
+
+        for sensor, sensor_frames in frames_cpu.items():
+            sensor_data = latest_object_data.get(sensor)
+            if sensor_data is None:
+                logs.append(
+                    {
+                        "epoch": int(epoch_idx),
+                        "train_step": int(train_step),
+                        "sensor": sensor,
+                        "status": "no_detector_data",
+                    }
+                )
+                continue
+
+            boxes = sensor_data.get("boxes")
+            object_mask = sensor_data.get("object_mask")
+            scores = sensor_data.get("scores")
+            labels_nested = sensor_data.get("labels")
+
+            if boxes is None or object_mask is None:
+                logs.append(
+                    {
+                        "epoch": int(epoch_idx),
+                        "train_step": int(train_step),
+                        "sensor": sensor,
+                        "status": "missing_boxes_or_mask",
+                    }
+                )
+                continue
+
+            boxes_np = boxes.detach().cpu().numpy()
+            mask_np = object_mask.detach().cpu().numpy().astype(bool)
+            scores_np = scores.detach().cpu().numpy() if scores is not None else None
+
+            if isinstance(labels_nested, torch.Tensor):
+                labels_data = labels_nested.detach().cpu().tolist()
+            else:
+                labels_data = labels_nested
+
+            B, T = boxes_np.shape[0], boxes_np.shape[1]
+            limit_b = min(B, max_batches)
+            limit_t = min(T, max_timesteps)
+
+            for b in range(limit_b):
+                goal_text = None
+                if tasks and b < len(tasks):
+                    goal_text = tasks[b]
+
+                for t in range(limit_t):
+                    mask_flags = mask_np[b, t].tolist()
+                    active_indices = [idx for idx, flag in enumerate(mask_flags) if flag]
+
+                    labels_for_step: List[Any] = []
+                    if labels_data is not None:
+                        try:
+                            labels_sample = labels_data[b][t]
+                        except (TypeError, IndexError):
+                            labels_sample = None
+                        if labels_sample is not None:
+                            for idx in active_indices:
+                                label_idx = idx + 1 if len(labels_sample) > (idx + 1) else idx
+                                labels_for_step.append(labels_sample[label_idx])
+
+                    detections = []
+                    for pos, idx in enumerate(active_indices):
+                        det: Dict[str, Any] = {
+                            "index": int(idx),
+                            "box_xyxy": [float(coord) for coord in boxes_np[b, t, idx].tolist()],
+                        }
+                        if scores_np is not None and idx < scores_np.shape[-1]:
+                            det["score"] = float(scores_np[b, t, idx])
+                        if pos < len(labels_for_step):
+                            det["label"] = labels_for_step[pos]
+                        detections.append(det)
+
+                    record: Dict[str, Any] = {
+                        "epoch": int(epoch_idx),
+                        "train_step": int(train_step),
+                        "sensor": sensor,
+                        "batch_index": int(b),
+                        "timestep": int(t),
+                        "goal": goal_text,
+                        "num_candidates": int(boxes_np.shape[2]),
+                        "num_active": len(active_indices),
+                        "detections": detections,
+                    }
+                    if scores_np is None:
+                        record["status"] = "scores_missing"
+                    elif not detections:
+                        record.setdefault("status", "no_active_detections")
+                    logs.append(record)
+
+        return logs
+
     def forward_batch(self, batch):
         if len(batch) == 0:
             from utils.debug_utils import ForkedPdb
@@ -317,7 +454,7 @@ class LitModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self.train_steps += 1
         outputs, proc_batch = self.forward_batch(batch)
-        self._cache_visual_debug_batch(proc_batch)
+        self._cache_visual_debug_batch(proc_batch, batch)
         self.frames_metric.update(proc_batch["lengths"])
         train_frames = 0
         if self.train_steps % 10 == 0:
