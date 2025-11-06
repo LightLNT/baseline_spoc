@@ -70,10 +70,10 @@ class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     detector_prompt: str = "a "
     detector_device: str = "cuda"
     detector_confidence_threshold: Optional[float] = None
-    detector_min_size_test: Optional[int] = None
-    detector_max_size_test: Optional[int] = None
+    detector_min_size_test: Optional[int] = 512#None
+    detector_max_size_test: Optional[int] = 640#None
     detector_phrases: Sequence[str] = field(default_factory=lambda: ["object"])
-    max_detector_vocabulary: int = 128
+    max_detector_vocabulary: int = 32 #128
     pooling: Literal["attention", "mean"] = "attention"
     min_patch_overlap: int = 1
     use_detector: bool = True

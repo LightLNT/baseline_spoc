@@ -143,10 +143,13 @@ class LitModel(pl.LightningModule):
                 full_cam = np.transpose(full_cam, (0, 3, 1, 2))
                 return wandb.Video(full_cam, fps=5)
 
-            video = combine_observations_and_save_path(
-                batch_item["observations"]["raw_navigation_camera"],
-                batch_item["observations"]["raw_manipulation_camera"],
-            )
+            nav_frames = batch_item["observations"].get("raw_navigation_camera")
+            manip_frames = batch_item["observations"].get("raw_manipulation_camera")
+
+            if manip_frames is not None:
+                video = combine_observations_and_save_path(nav_frames, manip_frames)
+            else:
+                video = combine_observations_and_save_path(nav_frames, nav_frames)
 
             sensor_path = batch_item["raw_navigation_camera"]
             data.append([task, video, actions_gt, actions_pred, sensor_path])
