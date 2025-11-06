@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 from allenact.embodiedai.models.basic_models import RNNStateEncoder
@@ -193,6 +194,7 @@ class EarlyFusionCnnRNN(nn.Module):
         input_sensors,
         loss,
         ckpt_pth=None,
+        detector_usage: Optional[str] = None,
     ):
         model_cfg = EarlyFusionCnnRNNConfig()
         model_cfg.action_loss = "action" in loss

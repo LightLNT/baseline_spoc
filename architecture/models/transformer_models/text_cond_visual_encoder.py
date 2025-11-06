@@ -77,6 +77,8 @@ class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     pooling: Literal["attention", "mean"] = "attention"
     min_patch_overlap: int = 1
     use_detector: bool = True
+    detector_usage: Literal["always", "eval_only", "train_only", "never"] = "always"
+    ground_truth_sensor_map: Dict[str, Sequence[str]] = field(default_factory=dict)
     # legacy fields kept for backward compatibility and gracefully ignored when Detic is used
     detector_model_id: Optional[str] = None
     detector_box_threshold: float = 0.25
@@ -305,8 +307,22 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         self.detector_device = torch.device("cpu")
         self.detector_pool: List[Tuple[DeticPredictor, torch.device]] = []
         self.detector_devices: List[torch.device] = []
-        self._goal_tokenizer = None
+        self._detector_usage = getattr(cfg, "detector_usage", "always")
+        self._ground_truth_sensor_map = dict(getattr(cfg, "ground_truth_sensor_map", {}) or {})
+        if not self._ground_truth_sensor_map:
+            self._ground_truth_sensor_map = {
+                "raw_navigation_camera": (
+                    "nav_task_relevant_object_bbox",
+                    "nav_accurate_object_bbox",
+                ),
+                "raw_manipulation_camera": (
+                    "manip_task_relevant_object_bbox",
+                    "manip_accurate_object_bbox",
+                ),
+            }
         self._detector_debug_logged: Dict[str, bool] = {}
+        self._missing_gt_warned: Set[str] = set()
+        self._goal_tokenizer = None
         if cfg.use_detector:
             if cfg.detector_model_id:
                 warnings.warn(
@@ -486,6 +502,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         return boxes_list, scores_list, labels_list, {
             "vocabulary": list(vocabulary_reference),
             "per_image_allowed": per_image_allowed,
+            "mode": "detector",
             "stats": {
                 "flattened_batch": int(batch),
                 "sequence_batch": int(B) if B is not None else None,
@@ -495,6 +512,215 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             },
         }
 
+
+    def _should_use_detector(self) -> bool:
+        if not self.cfg.use_detector:
+            return False
+        if not self.detector_pool:
+            return False
+        mode = getattr(self, "_detector_usage", "always")
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        if mode == "eval_only":
+            return not self.training
+        if mode == "train_only":
+            return self.training
+        return True
+
+    def _ground_truth_sources_for_sensor(self, sensor: str) -> Sequence[str]:
+        direct = self._ground_truth_sensor_map.get(sensor)
+        if direct:
+            return direct
+        for key, sources in self._ground_truth_sensor_map.items():
+            if key in sensor:
+                return sources
+        sensor_lower = sensor.lower()
+        if "nav" in sensor_lower:
+            return (
+                "nav_task_relevant_object_bbox",
+                "nav_accurate_object_bbox",
+            )
+        if "manip" in sensor_lower:
+            return (
+                "manip_task_relevant_object_bbox",
+                "manip_accurate_object_bbox",
+            )
+        return ()
+
+    def _build_ground_truth_detections(
+        self,
+        sensor: str,
+        non_visual_sensors: Optional[Dict[str, torch.Tensor]],
+        B: int,
+        T: int,
+        device: torch.device,
+        image_shape: Tuple[int, int],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]], Dict[str, Any]]:
+        raw_height, raw_width = image_shape
+        height = max(float(raw_height), 1.0)
+        width = max(float(raw_width), 1.0)
+        if non_visual_sensors is None:
+            if sensor not in self._missing_gt_warned:
+                warnings.warn(
+                    f"Ground-truth boxes requested for sensor '{sensor}' but non-visual sensors are missing.",
+                    RuntimeWarning,
+                )
+                self._missing_gt_warned.add(sensor)
+            zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(B * T)]
+            zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(B * T)]
+            empty_labels = [[] for _ in range(B * T)]
+            return zeros_boxes, zeros_scores, empty_labels, {
+                "vocabulary": [],
+                "per_image_allowed": [set() for _ in range(B * T)],
+                "mode": "ground_truth",
+                "stats": {
+                    "flattened_batch": int(B * T),
+                    "sequence_batch": int(B),
+                    "sequence_length": int(T),
+                    "image_shape": (3, int(raw_height), int(raw_width)),
+                    "device_plan": [],
+                    "source_sensors": [],
+                },
+            }
+
+        source_names = [s for s in self._ground_truth_sources_for_sensor(sensor) if s in non_visual_sensors]
+        if not source_names:
+            if sensor not in self._missing_gt_warned:
+                warnings.warn(
+                    f"No configured ground-truth sensors found for visual sensor '{sensor}'.",
+                    RuntimeWarning,
+                )
+                self._missing_gt_warned.add(sensor)
+            zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(B * T)]
+            zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(B * T)]
+            empty_labels = [[] for _ in range(B * T)]
+            return zeros_boxes, zeros_scores, empty_labels, {
+                "vocabulary": [],
+                "per_image_allowed": [set() for _ in range(B * T)],
+                "mode": "ground_truth",
+                "stats": {
+                    "flattened_batch": int(B * T),
+                    "sequence_batch": int(B),
+                    "sequence_length": int(T),
+                    "image_shape": (3, int(raw_height), int(raw_width)),
+                    "device_plan": [],
+                    "source_sensors": [],
+                },
+            }
+
+        tensors: Dict[str, torch.Tensor] = {}
+        for name in source_names:
+            tensor = non_visual_sensors[name]
+            if not torch.is_tensor(tensor):
+                tensor = torch.as_tensor(tensor)
+            tensors[name] = tensor.to(device=device, dtype=torch.float32, non_blocking=True)
+
+        flattened_batch = B * T
+        boxes_list: List[torch.Tensor] = []
+        scores_list: List[torch.Tensor] = []
+        labels_list: List[List[str]] = []
+        per_image_allowed: List[Set[str]] = []
+        vocabulary: List[str] = []
+        vocabulary_set: Set[str] = set()
+
+        for b in range(B):
+            for t in range(T):
+                frame_boxes: List[torch.Tensor] = []
+                frame_scores: List[torch.Tensor] = []
+                frame_labels: List[str] = []
+                for source_name, tensor in tensors.items():
+                    entry = tensor[b, t]
+                    if entry.numel() == 0:
+                        continue
+                    flat = entry.view(-1)
+                    if flat.numel() == 0:
+                        continue
+                    if torch.all(flat < 0):
+                        continue
+                    num_boxes = flat.numel() // 5
+                    if num_boxes == 0:
+                        continue
+                    reshaped = flat.reshape(num_boxes, 5)
+                    for idx_box in range(num_boxes):
+                        coords = reshaped[idx_box, :4]
+                        if torch.any(torch.isnan(coords)):
+                            continue
+                        x1, y1, x2, y2 = [float(val) for val in coords.tolist()]
+                        if max(x1, y1, x2, y2) >= 999 or min(x1, y1, x2, y2) < 0:
+                            continue
+                        if x2 <= x1 or y2 <= y1:
+                            continue
+                        norm_box = torch.tensor(
+                            [x1 / float(width), y1 / float(height), x2 / float(width), y2 / float(height)],
+                            dtype=torch.float32,
+                            device=device,
+                        ).clamp(0.0, 1.0)
+                        frame_boxes.append(norm_box)
+                        extra = reshaped[idx_box, 4].item()
+                        area_score = float(extra)
+                        if not math.isfinite(area_score) or area_score <= 0:
+                            area_score = float((x2 - x1) * (y2 - y1))
+                        frame_scores.append(torch.tensor(area_score, dtype=torch.float32, device=device))
+                        label = f"{source_name}_{idx_box}"
+                        frame_labels.append(label)
+                        if label not in vocabulary_set:
+                            vocabulary_set.add(label)
+                            vocabulary.append(label)
+                if frame_boxes:
+                    boxes_tensor = torch.stack(frame_boxes, dim=0)
+                    scores_tensor = torch.stack(frame_scores, dim=0)
+                else:
+                    boxes_tensor = torch.zeros((0, 4), dtype=torch.float32, device=device)
+                    scores_tensor = torch.zeros(0, dtype=torch.float32, device=device)
+                boxes_list.append(boxes_tensor)
+                scores_list.append(scores_tensor)
+                labels_list.append(frame_labels)
+                per_image_allowed.append(set(frame_labels))
+
+        return boxes_list, scores_list, labels_list, {
+            "vocabulary": vocabulary,
+            "per_image_allowed": per_image_allowed,
+            "mode": "ground_truth",
+            "stats": {
+                "flattened_batch": int(flattened_batch),
+                "sequence_batch": int(B),
+                "sequence_length": int(T),
+                "image_shape": (3, int(raw_height), int(raw_width)),
+                "device_plan": [],
+                "source_sensors": list(tensors.keys()),
+            },
+        }
+
+    def _gather_detections(
+        self,
+        sensor: str,
+        images: torch.Tensor,
+        B: int,
+        T: int,
+        goals: Optional[dict],
+        non_visual_sensors: Optional[Dict[str, torch.Tensor]],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]], Dict[str, Any]]:
+        if self._should_use_detector():
+            boxes_list, scores_list, labels_list, detector_meta = self._detect_boxes(images, B=B, T=T, goals=goals)
+            if detector_meta is None:
+                detector_meta = {}
+            else:
+                detector_meta = dict(detector_meta)
+            detector_meta.setdefault("mode", "detector")
+            return boxes_list, scores_list, labels_list, detector_meta
+
+        height = int(images.shape[2]) if images.ndim >= 3 else 0
+        width = int(images.shape[3]) if images.ndim >= 4 else 0
+        return self._build_ground_truth_detections(
+            sensor=sensor,
+            non_visual_sensors=non_visual_sensors,
+            B=B,
+            T=T,
+            device=images.device,
+            image_shape=(height, width),
+        )
     def _decode_goal_strings(
         self,
         goals: Optional[dict],
@@ -752,6 +978,10 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 "per_image_allowed": formatted_allowed,
             }
 
+            mode = detector_meta.get("mode") if isinstance(detector_meta, dict) else None
+            if mode:
+                detector_info["mode"] = mode
+
             stats = detector_meta.get("stats") if isinstance(detector_meta, dict) else None
             if stats:
                 detector_info["stats"] = stats
@@ -770,7 +1000,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                         plan_str = "none"
                     warnings.warn(
                         (
-                            f"Detic input stats for sensor '{sensor}': flattened_batch={flattened_batch}, "
+                            f"Detic input stats for sensor '{sensor}' (mode={mode or 'unknown'}): flattened_batch={flattened_batch}, "
                             f"sequence_batch={sequence_batch}, sequence_length={sequence_length}, "
                             f"image_shape={stats.get('image_shape')}, per_device={plan_str}."
                         ),
@@ -789,7 +1019,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             "detector_meta": detector_info,
         }
 
-    def get_image_text_feats(self, frames, goals, text_feats):
+    def get_image_text_feats(self, frames, goals, text_feats, non_visual_sensors=None):
         all_img_features = {}
         images_chw = None
         self.latest_object_data = {}
@@ -801,11 +1031,13 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 images_chw = (C, H, W)
             assert images_chw == (C, H, W)
             flattened = imgs.reshape(B * T, C, H, W)
-            boxes_list, scores_list, labels_list, detector_meta = self._detect_boxes(
-                flattened,
+            boxes_list, scores_list, labels_list, detector_meta = self._gather_detections(
+                sensor=sensor,
+                images=flattened,
                 B=B,
                 T=T,
                 goals=goals,
+                non_visual_sensors=non_visual_sensors,
             )
             extracted = self.object_token_extractor(flattened, boxes_list, scores_list)
             sensor_tokens, token_mask = self._prepare_sensor_tokens(extracted)
@@ -825,6 +1057,30 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         text_feats_ = text_feats.unsqueeze(1).tile(1, T, 1, 1).reshape(B * T, L, D)
         fusion_token = self.fusion_token.reshape(1, 1, D).tile(B * T, 1, 1)
         return fusion_token, concatenated_feats, text_feats, text_feats_, B, T, D
+
+    def forward(
+        self,
+        frames,
+        goals,
+        text_feats=None,
+        non_visual_sensors=None,
+    ):
+        (
+            fusion_token,
+            concatenated_feats,
+            text_feats,
+            text_feats_,
+            B,
+            T,
+            D,
+        ) = self.get_image_text_feats(frames, goals, text_feats, non_visual_sensors)
+        input_features = [fusion_token, concatenated_feats, text_feats_]
+
+        fused_feats = self.fusion_xformer(torch.cat(input_features, 1))
+
+        fused_feats = fused_feats[:, 0, :]
+
+        return fused_feats.reshape(B, T, D), text_feats
 
 
 class PositionalEncoder(nn.Module):

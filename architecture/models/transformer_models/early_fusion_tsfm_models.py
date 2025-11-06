@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 from open_clip.tokenizer import HFTokenizer
@@ -183,6 +184,7 @@ class EarlyFusionCnnTransformer(nn.Module):
         input_sensors,
         loss,
         ckpt_pth=None,
+        detector_usage: Optional[str] = None,
     ):
         model_cfg = EarlyFusionCnnTransformerConfig()
         model_cfg.action_loss = "action" in loss
@@ -296,6 +298,9 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.decoder = TransformerConfig(3, 512, 8)
         else:
             raise NotImplementedError
+
+        if detector_usage is not None and hasattr(model_cfg.visual_encoder, "detector_usage"):
+            model_cfg.visual_encoder.detector_usage = detector_usage
 
         model = EarlyFusionCnnTransformer(model_cfg)
         if ckpt_pth is not None:

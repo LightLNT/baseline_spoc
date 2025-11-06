@@ -67,6 +67,13 @@ def arg_parser_for_offline_training():
     default=["raw_navigation_camera"],
     )
     parser.add_argument(
+        "--detector_usage",
+        type=str,
+        default="always",
+        choices=["always", "eval_only", "train_only", "never"],
+        help="Control when object detectors run (only relevant for object-token models).",
+    )
+    parser.add_argument(
         "--visualize_object_tokens",
         type=str2bool,
         default=False,
@@ -98,6 +105,21 @@ class LitModel(pl.LightningModule):
         super().__init__()
         self.use_non_strict_ckpt_loading = args.use_non_strict_ckpt_loading
         self.restart_optimizer = args.restart_optimizer
+        if "object_token" in args.model_version.lower() and args.detector_usage in {"eval_only", "train_only", "never"}:
+            required_bbox_sensors = [
+                "nav_task_relevant_object_bbox",
+                "nav_accurate_object_bbox",
+            ]
+            if "raw_manipulation_camera" in args.input_sensors:
+                required_bbox_sensors.extend(
+                    [
+                        "manip_task_relevant_object_bbox",
+                        "manip_accurate_object_bbox",
+                    ]
+                )
+            for sensor in required_bbox_sensors:
+                if sensor not in args.input_sensors:
+                    args.input_sensors.append(sensor)
         filtered_input_sensors = [
             sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
         ]
@@ -112,6 +134,7 @@ class LitModel(pl.LightningModule):
             input_sensors=args.input_sensors,
             loss=args.loss,
             ckpt_pth=args.ckpt_pth,
+            detector_usage=getattr(args, "detector_usage", None),
         )
         self.model = model
         self.preproc = preproc
