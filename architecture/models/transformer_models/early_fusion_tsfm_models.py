@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass, field
 
 import numpy as np
 from open_clip.tokenizer import HFTokenizer
@@ -35,9 +36,9 @@ EarlyFusionCnnTransformerPreprocessor = Preprocessor
 
 @dataclass
 class EarlyFusionCnnTransformerConfig:
-    visual_encoder: TextCondVisualEncoderConfig = TextCondVisualEncoderConfig()
+    visual_encoder: TextCondVisualEncoderConfig = field(default_factory=TextCondVisualEncoderConfig)
     visual_text_encoder_class: str = "TextCondMultiCameraVisualEncoder"
-    decoder: TransformerConfig = TransformerConfig(3, 512, 8)
+    decoder: TransformerConfig = field(default_factory=lambda: TransformerConfig(3, 512, 8))
     num_actions: int = len(ALL_STRETCH_ACTIONS)
     max_length: int = 1000
     action_loss: bool = True
@@ -270,12 +271,14 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
             model_cfg.visual_encoder.input_sensors = input_sensors
             model_cfg.visual_encoder.detector_config_file = (
-                #"Detic_LCOCO_CLIP_R50_4x_ft4x.yaml"
-                "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+                #"Detic_LCOCO_CLIP_R50_4x_ft4x.yaml",
+                "Detic_LCOCOI21k_CLIP_R18_640b32_4x_ft4x_max-size.yaml"
+                #"Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
             )
             model_cfg.visual_encoder.detector_weights_file = (
                 #"Detic_LCOCO_CLIP_R50_4x_ft4x.pth"
-                "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+                #"Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+                "Detic_LCOCOI21k_CLIP_R18_640b32_4x_ft4x_max-size.pth"
             )
             detector_device_env = os.environ.get("DETIC_DEVICE") or os.environ.get("GROUNDING_DINO_DEVICE")
             if detector_device_env:

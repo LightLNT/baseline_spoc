@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from typing import List, Optional, Sequence
 
 import torch
@@ -119,7 +120,31 @@ else:
 
         add_centernet_config(cfg)
         add_detic_config(cfg)
-        cfg.merge_from_file(config_file)
+        try:
+            cfg.merge_from_file(config_file)
+        except TypeError:
+            # Some environments parse YAML keys as integers, which yacs rejects. Normalize to strings.
+            import yaml
+
+            from detectron2.config import CfgNode  # type: ignore
+
+            def _stringify_keys(node):
+                if isinstance(node, dict):
+                    return {str(key): _stringify_keys(value) for key, value in node.items()}
+                if isinstance(node, list):
+                    return [_stringify_keys(item) for item in node]
+                return node
+
+            with open(config_file, "r", encoding="utf-8") as handle:
+                loaded_cfg = yaml.safe_load(handle)
+
+            if loaded_cfg is None:
+                raise FileNotFoundError(f"Detic config {config_file} appears to be empty or invalid.")
+
+            normalized_cfg = CfgNode(_stringify_keys(loaded_cfg))
+            cfg.merge_from_other_cfg(normalized_cfg)
+
+
         if opts:
             cfg.merge_from_list([str(item) for item in opts])
 
@@ -169,11 +194,27 @@ else:
                     raise FileNotFoundError(f"Could not locate Detic config file: {config_file}")
                 config_file = candidate
 
-            if not os.path.exists(model_weights_file):
-                candidate = os.path.join(DETIC_REPO_PATH, "models", model_weights_file)
-                if not os.path.exists(candidate):
-                    raise FileNotFoundError(f"Could not locate Detic model weights: {model_weights_file}")
-                model_weights_file = candidate
+            weight_candidates = []
+            user_specified = os.path.expanduser(model_weights_file)
+            weight_candidates.append(user_specified)
+            if DETIC_REPO_PATH is not None:
+                weight_candidates.append(os.path.join(DETIC_REPO_PATH, "models", model_weights_file))
+            cache_root = os.environ.get("DETIC_WEIGHTS_PATH", os.path.expanduser("~/.cache/detic"))
+            weight_candidates.append(os.path.join(cache_root, os.path.basename(model_weights_file)))
+
+            resolved_weights = None
+            for candidate in weight_candidates:
+                if candidate and os.path.exists(candidate):
+                    resolved_weights = candidate
+                    break
+
+            if resolved_weights is None:
+                paths_checked = ", ".join(weight_candidates)
+                raise FileNotFoundError(
+                    f"Could not locate Detic model weights: {model_weights_file}. Checked: {paths_checked}"
+                )
+
+            model_weights_file = resolved_weights
 
             opts: List[str] = [
                 "MODEL.WEIGHTS",
@@ -199,11 +240,18 @@ else:
 
             self.model = build_model(self.cfg)
             checkpointer = DetectionCheckpointer(self.model)
+            # Suppress the noisy FutureWarning emitted by torch.load via fvcore checkpointing.
+            warnings.filterwarnings(
+                "ignore",
+                message="You are using `torch.load` with `weights_only=False`",
+                category=FutureWarning,
+                module="fvcore.common.checkpoint",
+            )
             checkpointer.load(cfg.MODEL.WEIGHTS)
             self.model.eval()
 
             self._vocabulary: Optional[List[str]] = None
-            self.vocabulary = list(vocabulary)
+            self.vocabulary = [str(item) for item in vocabulary]
 
             assert cfg.INPUT.FORMAT == "RGB"
 
@@ -226,13 +274,13 @@ else:
             return text_encoder
 
         def get_clip_embeddings(self, vocabulary, prompt="a "):
-            texts = [prompt + x for x in vocabulary]
+            texts = [prompt + str(x) for x in vocabulary]
             with torch.no_grad():
                 return self.text_encoder(texts).detach().permute(1, 0).contiguous()
 
         @vocabulary.setter
         def vocabulary(self, vocabulary: Sequence[str]):
-            vocab_list = list(vocabulary)
+            vocab_list = [str(item) for item in vocabulary]
             if self._vocabulary is not None and list(self._vocabulary) == vocab_list:
                 return
             self._vocabulary = vocab_list

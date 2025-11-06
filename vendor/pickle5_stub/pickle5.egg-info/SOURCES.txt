@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+setup.cfg
+pickle5/__init__.py
+pickle5.egg-info/PKG-INFO
+pickle5.egg-info/SOURCES.txt
+pickle5.egg-info/dependency_links.txt
+pickle5.egg-info/top_level.txt

@@ -5,7 +5,7 @@ import warnings
 
 # from utils.transformation_util import get_full_transformation_list, sample_a_specific_transform
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -57,7 +57,7 @@ def create_text_encoder(encoder_name):
 class TextCondVisualEncoderConfig:
     image_encoder: str = "Dinov2Small"
     text_encoder: str = "t5-small"
-    fusion_xformer: TransformerConfig = TransformerConfig(3, 512, 8)
+    fusion_xformer: TransformerConfig = field(default_factory=lambda: TransformerConfig(3,512,8))
     input_sensors: List[str] = None
     bbox_encoding_type: Literal["positional"] = "positional"
 
@@ -68,7 +68,7 @@ class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     detector_config_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
     detector_weights_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
     detector_prompt: str = "a "
-    detector_device: str = "cuda"
+    detector_device: Union[str, Sequence[str]] = "cuda"
     detector_confidence_threshold: Optional[float] = None
     detector_min_size_test: Optional[int] = 512#None
     detector_max_size_test: Optional[int] = 640#None
@@ -303,40 +303,67 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         )
         self.detector: Optional[DeticPredictor] = None
         self.detector_device = torch.device("cpu")
+        self.detector_pool: List[Tuple[DeticPredictor, torch.device]] = []
+        self.detector_devices: List[torch.device] = []
         self._goal_tokenizer = None
+        self._detector_debug_logged: Dict[str, bool] = {}
         if cfg.use_detector:
             if cfg.detector_model_id:
                 warnings.warn(
                     "detector_model_id is deprecated; Detic uses detector_config_file/detector_weights_file.",
                     RuntimeWarning,
                 )
-            detector_device = self._resolve_detector_device(cfg.detector_device)
+            resolved_devices = self._resolve_detector_devices(cfg.detector_device)
+            if not resolved_devices:
+                resolved_devices = [torch.device("cpu")]
+            self.detector_devices = resolved_devices
+            detector_device = resolved_devices[0]
             confidence_threshold = (
                 cfg.detector_confidence_threshold
                 if cfg.detector_confidence_threshold is not None
                 else cfg.detector_box_threshold
             )
-            initial_vocabulary = self._normalize_detector_phrases(cfg.detector_phrases)
+            initial_vocabulary = [
+                str(phrase) for phrase in self._normalize_detector_phrases(cfg.detector_phrases)
+            ]
             if not initial_vocabulary:
                 initial_vocabulary = ["object"]
-            try:
-                self.detector = DeticPredictor(
-                    vocabulary=initial_vocabulary,
-                    prompt=cfg.detector_prompt,
-                    config_file=cfg.detector_config_file,
-                    model_weights_file=cfg.detector_weights_file,
-                    min_size_test=cfg.detector_min_size_test,
-                    max_size_test=cfg.detector_max_size_test,
-                    confidence_threshold=confidence_threshold,
-                    device=str(detector_device),
-                )
-                self.detector.to(detector_device)
-                self.detector_device = detector_device
-            except Exception as exc:
-                warnings.warn(
-                    f"Failed to initialize DeticPredictor ({exc}); continuing without detector.",
-                    RuntimeWarning,
-                )
+            for device in resolved_devices:
+                try:
+                    predictor = DeticPredictor(
+                        vocabulary=initial_vocabulary,
+                        prompt=cfg.detector_prompt,
+                        config_file=cfg.detector_config_file,
+                        model_weights_file=cfg.detector_weights_file,
+                        min_size_test=cfg.detector_min_size_test,
+                        max_size_test=cfg.detector_max_size_test,
+                        confidence_threshold=confidence_threshold,
+                        device=str(device),
+                    )
+                    predictor.to(device)
+                    self.detector_pool.append((predictor, device))
+                except Exception as exc:
+                    vocab_sample = initial_vocabulary[:5]
+                    vocab_types = [type(item).__name__ for item in vocab_sample]
+                    vocab_values = [repr(item) for item in vocab_sample]
+                    import traceback
+
+                    tb = traceback.format_exc()
+                    warnings.warn(
+                        (
+                            f"Failed to initialize DeticPredictor on {device} ({type(exc).__name__}: {exc}); "
+                            f"initial_vocabulary_types={vocab_types}, initial_vocabulary_values={vocab_values}. "
+                            f"traceback={tb.strip()} "
+                            "Continuing without detector on this device."
+                        ),
+                        RuntimeWarning,
+                    )
+            if self.detector_pool:
+                self.detector_devices = [dev for _, dev in self.detector_pool]
+                self.detector = self.detector_pool[0][0]
+                self.detector_device = self.detector_pool[0][1]
+            else:
+                self.detector_devices = []
                 self.detector = None
                 self.detector_device = torch.device("cpu")
 
@@ -356,7 +383,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]], Dict[str, Any]]:
         batch = images.shape[0]
         device = images.device
-        if self.detector is None:
+        if not self.detector_pool:
             zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
             zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
             empty_labels = [[] for _ in range(batch)]
@@ -367,28 +394,50 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
 
         goal_texts = self._decode_goal_strings(goals, B, T)
         vocabulary, per_image_allowed = self._build_detector_vocabulary(goal_texts, batch)
-        try:
-            self.detector.vocabulary = vocabulary
-        except Exception as exc:
-            warnings.warn(f"Failed to update Detic vocabulary ({exc}); retaining previous vocabulary.", RuntimeWarning)
+        self._update_detector_vocabulary(vocabulary)
 
-        detector_inputs = images.detach().to(self.detector_device, dtype=torch.float32)
-        try:
-            detections = self.detector(detector_inputs)
-        except Exception as exc:
-            warnings.warn(f"Detic inference failed ({exc}); returning empty detections.", RuntimeWarning)
-            zeros_boxes = [torch.zeros((0, 4), dtype=torch.float32, device=device) for _ in range(batch)]
-            zeros_scores = [torch.zeros(0, dtype=torch.float32, device=device) for _ in range(batch)]
-            empty_labels = [[] for _ in range(batch)]
-            return zeros_boxes, zeros_scores, empty_labels, {
-                "vocabulary": list(vocabulary),
-                "per_image_allowed": per_image_allowed,
-            }
+        detections: List[Any] = []
+        total_devices = len(self.detector_pool)
+        base_chunk = batch // total_devices
+        remainder = batch % total_devices
+        start = 0
+        chunk_plan: List[Dict[str, Any]] = []
+        for idx, (predictor, det_device) in enumerate(self.detector_pool):
+            chunk = base_chunk + (1 if idx < remainder else 0)
+            if chunk <= 0 or start >= batch:
+                continue
+            end = min(batch, start + chunk)
+            current_inputs = images[start:end].detach().to(det_device, dtype=torch.float32)
+            try:
+                current_detections = predictor(current_inputs)
+            except Exception as exc:
+                warnings.warn(
+                    f"Detic inference failed on device {det_device} ({exc}); returning empty detections for assigned batch.",
+                    RuntimeWarning,
+                )
+                current_detections = [None] * (end - start)
+            if not isinstance(current_detections, list):
+                current_detections = [current_detections]
+            detections.extend(current_detections)
+            chunk_plan.append(
+                {
+                    "device": str(det_device),
+                    "start": int(start),
+                    "end": int(end),
+                    "batch": int(end - start),
+                }
+            )
+            start = end
+
+        if len(detections) < batch:
+            missing = batch - len(detections)
+            detections.extend([None] * missing)
 
         boxes_list: List[torch.Tensor] = []
         scores_list: List[torch.Tensor] = []
         labels_list: List[List[str]] = []
-        vocabulary_set = set(self.detector.vocabulary)
+        vocabulary_reference = self.detector.vocabulary if self.detector is not None else []
+        vocabulary_set = set(vocabulary_reference)
         for idx, det in enumerate(detections):
             instances = det.get("instances", None) if isinstance(det, dict) else None
             if instances is None or len(instances) == 0:
@@ -435,8 +484,15 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             labels_list.append(padded_labels)
 
         return boxes_list, scores_list, labels_list, {
-            "vocabulary": list(self.detector.vocabulary),
+            "vocabulary": list(vocabulary_reference),
             "per_image_allowed": per_image_allowed,
+            "stats": {
+                "flattened_batch": int(batch),
+                "sequence_batch": int(B) if B is not None else None,
+                "sequence_length": int(T) if T is not None else None,
+                "image_shape": tuple(images.shape[1:]),
+                "device_plan": chunk_plan,
+            },
         }
 
     def _decode_goal_strings(
@@ -474,14 +530,14 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         goal_texts: Optional[List[str]],
         batch: int,
     ) -> Tuple[List[str], List[Set[str]]]:
-        base_phrases = self._normalize_detector_phrases(self.cfg.detector_phrases)
+        base_phrases = [str(phrase) for phrase in self._normalize_detector_phrases(self.cfg.detector_phrases)]
         if not base_phrases:
             base_phrases = ["object"]
 
         cleaned_goal_texts: List[str] = []
         if goal_texts is not None:
             for text in goal_texts:
-                cleaned_goal_texts.append(text.strip() if isinstance(text, str) else "")
+                cleaned_goal_texts.append(text.strip() if isinstance(text, str) else str(text))
         candidate_phrases = base_phrases + [t for t in cleaned_goal_texts if t]
 
         unique_vocab: List[str] = []
@@ -490,8 +546,9 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         for phrase in candidate_phrases:
             if phrase in seen:
                 continue
-            unique_vocab.append(phrase)
-            seen.add(phrase)
+            phrase_str = str(phrase)
+            unique_vocab.append(phrase_str)
+            seen.add(phrase_str)
             if len(unique_vocab) >= max_vocab:
                 break
 
@@ -505,7 +562,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             if cleaned_goal_texts and idx < len(cleaned_goal_texts):
                 goal_phrase = cleaned_goal_texts[idx]
                 if goal_phrase:
-                    allowed.add(goal_phrase)
+                    allowed.add(str(goal_phrase))
             allowed = {phrase for phrase in allowed if phrase in seen}
             if not allowed:
                 allowed = set(unique_vocab)
@@ -519,9 +576,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             return []
         normalized: List[str] = []
         for phrase in phrases:
-            if not isinstance(phrase, str):
-                continue
-            cleaned = phrase.strip()
+            cleaned = str(phrase).strip()
             if cleaned:
                 normalized.append(cleaned)
         return normalized
@@ -546,11 +601,64 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         adapted = adapted * token_mask.unsqueeze(-1).float()
         return adapted, token_mask
 
+    def _update_detector_vocabulary(self, vocabulary: Sequence[str]) -> None:
+        if not self.detector_pool:
+            return
+        string_vocab = [str(item) for item in vocabulary]
+        for predictor, _ in self.detector_pool:
+            try:
+                predictor.vocabulary = string_vocab
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to update Detic vocabulary ({exc}); retaining previous vocabulary on this device.",
+                    RuntimeWarning,
+                )
+
+    def _resolve_detector_devices(self, requested: Union[str, Sequence[str], torch.device, None]) -> List[torch.device]:
+        if isinstance(requested, torch.device):
+            specs: List[Union[str, torch.device, None]] = [requested]
+        elif isinstance(requested, (list, tuple, set)):
+            specs = list(requested)
+        elif isinstance(requested, str) and "," in requested:
+            specs = [item.strip() for item in requested.split(",") if item.strip()]
+        else:
+            specs = [requested]
+
+        devices: List[torch.device] = []
+        for spec in specs:
+            devices.append(self._resolve_detector_device(spec))
+        unique_devices: List[torch.device] = []
+        for device in devices:
+            if device not in unique_devices:
+                unique_devices.append(device)
+        return unique_devices
+
     @staticmethod
-    def _resolve_detector_device(requested: Optional[str]) -> torch.device:
+    def _resolve_detector_device(requested: Optional[Union[str, torch.device]]) -> torch.device:
         if requested is None or requested == "":
             requested = "auto"
-        requested_lower = requested.lower() if isinstance(requested, str) else str(requested)
+        if isinstance(requested, torch.device):
+            device = requested
+            if device.type == "cuda" and not torch.cuda.is_available():
+                warnings.warn(
+                    "CUDA requested for Detic but no GPU is available; using CPU instead.",
+                    RuntimeWarning,
+                )
+                return torch.device("cpu")
+            return device
+
+        if isinstance(requested, str):
+            requested_str = requested.strip()
+            if requested_str.isdigit():
+                requested_str = f"cuda:{requested_str}"
+            elif requested_str.lower().startswith("gpu:") and requested_str[4:].isdigit():
+                requested_str = f"cuda:{requested_str[4:]}"
+            elif requested_str.lower().startswith("cuda") and requested_str[4:].isdigit():
+                requested_str = f"cuda:{requested_str[4:]}"
+        else:
+            requested_str = str(requested)
+
+        requested_lower = requested_str.lower()
         # If user asked for auto/cuda:auto or simply 'cuda', map to the current CUDA device
         if requested_lower in {"auto", "cuda:auto", "cuda"}:
             if torch.cuda.is_available():
@@ -566,7 +674,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
 
         # Otherwise try to construct the device directly (e.g. 'cuda:0' or 'cpu')
         try:
-            device = torch.device(requested)
+            device = torch.device(requested_str)
         except (TypeError, RuntimeError):
             warnings.warn(
                 f"Invalid detector device specification '{requested}', falling back to CPU.",
@@ -643,6 +751,32 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 "vocabulary": list(vocabulary),
                 "per_image_allowed": formatted_allowed,
             }
+
+            stats = detector_meta.get("stats") if isinstance(detector_meta, dict) else None
+            if stats:
+                detector_info["stats"] = stats
+                already_logged = self._detector_debug_logged.get(sensor, False)
+                if not already_logged:
+                    flattened_batch = stats.get("flattened_batch")
+                    sequence_batch = stats.get("sequence_batch")
+                    sequence_length = stats.get("sequence_length")
+                    plan = stats.get("device_plan") or []
+                    plan_str = ", ".join(
+                        f"{item.get('device')}:batch={item.get('batch')}"
+                        for item in plan
+                        if item.get("batch")
+                    )
+                    if not plan_str:
+                        plan_str = "none"
+                    warnings.warn(
+                        (
+                            f"Detic input stats for sensor '{sensor}': flattened_batch={flattened_batch}, "
+                            f"sequence_batch={sequence_batch}, sequence_length={sequence_length}, "
+                            f"image_shape={stats.get('image_shape')}, per_device={plan_str}."
+                        ),
+                        RuntimeWarning,
+                    )
+                    self._detector_debug_logged[sensor] = True
 
         self.latest_object_data[sensor] = {
             "boxes": boxes,

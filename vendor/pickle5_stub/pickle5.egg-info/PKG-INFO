@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: pickle5
+Version: 0.0.11.post2
+Summary: Compatibility shim for the pickle5 backport on Python 3.8+
+License: PSF
+Classifier: License :: OSI Approved :: Python Software Foundation License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+
+# pickle5 compatibility shim
+
+This package re-exports Python's built-in `pickle` module so that projects
+which still depend on the historical `pickle5` backport can run on modern
+Python versions (3.8+) where protocol 5 support is already included.

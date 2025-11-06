@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 import numpy as np
 from allenact.embodiedai.models.basic_models import RNNStateEncoder
 from open_clip.tokenizer import HFTokenizer
@@ -39,9 +41,9 @@ class RNNConfig:
 
 @dataclass
 class EarlyFusionCnnRNNConfig:
-    visual_encoder: TextCondVisualEncoderConfig = TextCondVisualEncoderConfig()
+    visual_encoder: TextCondVisualEncoderConfig = field(default_factory=TextCondVisualEncoderConfig)
     visual_text_encoder_class: str = "TextCondMultiCameraVisualEncoder"
-    decoder: RNNConfig = RNNConfig(3, 512, 512, "GRU", True)
+    decoder: RNNConfig = field(default_factory=RNNConfig)
     num_actions: int = len(ALL_STRETCH_ACTIONS)
     max_length: int = 1000
     action_loss: bool = True

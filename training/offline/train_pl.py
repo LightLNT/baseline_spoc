@@ -64,7 +64,7 @@ def arg_parser_for_offline_training():
     parser.add_argument(
         "--input_sensors",
         nargs="+",
-        default=["raw_navigation_camera", "raw_manipulation_camera"],
+    default=["raw_navigation_camera"],
     )
     parser.add_argument(
         "--visualize_object_tokens",
@@ -98,6 +98,15 @@ class LitModel(pl.LightningModule):
         super().__init__()
         self.use_non_strict_ckpt_loading = args.use_non_strict_ckpt_loading
         self.restart_optimizer = args.restart_optimizer
+        filtered_input_sensors = [
+            sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
+        ]
+        if len(filtered_input_sensors) != len(args.input_sensors):
+            warnings.warn(
+                "Removing 'raw_manipulation_camera' from input sensors to reduce inference load.",
+                RuntimeWarning,
+            )
+            args.input_sensors = filtered_input_sensors
         model, preproc = REGISTERED_MODELS[args.model].build_model(
             model_version=args.model_version,
             input_sensors=args.input_sensors,
@@ -136,20 +145,12 @@ class LitModel(pl.LightningModule):
             actions_gt = list(batch_item["observations"]["actions"])
             task = batch_item["observations"]["goal"]
 
-            def combine_observations_and_save_path(nav_cam, manip_cam):
-                nav_cam = nav_cam.cpu().numpy()
-                manip_cam = manip_cam.cpu().numpy()
-                full_cam = np.concatenate([nav_cam, manip_cam], axis=2)
-                full_cam = np.transpose(full_cam, (0, 3, 1, 2))
-                return wandb.Video(full_cam, fps=5)
-
             nav_frames = batch_item["observations"].get("raw_navigation_camera")
-            manip_frames = batch_item["observations"].get("raw_manipulation_camera")
-
-            if manip_frames is not None:
-                video = combine_observations_and_save_path(nav_frames, manip_frames)
-            else:
-                video = combine_observations_and_save_path(nav_frames, nav_frames)
+            if nav_frames is None:
+                continue
+            nav_frames = nav_frames.cpu().numpy()
+            nav_frames = np.transpose(nav_frames, (0, 3, 1, 2))
+            video = wandb.Video(nav_frames, fps=5)
 
             sensor_path = batch_item["raw_navigation_camera"]
             data.append([task, video, actions_gt, actions_pred, sensor_path])
@@ -821,7 +822,13 @@ if __name__ == "__main__":
     torch.hub._validate_not_a_forked_repo = (
         lambda a, b, c: True
     )  # This is for getting around the http limit rate error. From https://github.com/pytorch/vision/issues/4156#issuecomment-886005117
-    dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+    try:
+        torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+    except Exception as exc:
+        warnings.warn(
+            f"Skipping Dinov2 torch.hub preload due to error: {exc}. Cached weights will be used if available.",
+            RuntimeWarning,
+        )
 
     # Reduced matmul precision for NVIDIA A6000 GPUs
     if torch.cuda.is_available():
