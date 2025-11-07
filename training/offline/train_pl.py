@@ -93,6 +93,41 @@ def arg_parser_for_offline_training():
     )
     return parser
 
+def _prepare_input_sensors(args) -> None:
+    """Ensure required bbox sensors are included when detector runs are skipped."""
+    if getattr(args, "_prepared_input_sensors", False):
+        return
+
+    if "object_token" in str(args.model_version).lower() and getattr(
+        args, "detector_usage", "always"
+    ) in {"eval_only", "train_only", "never"}:
+        required_bbox_sensors = [
+            "nav_task_relevant_object_bbox",
+            "nav_accurate_object_bbox",
+        ]
+        if "raw_manipulation_camera" in args.input_sensors:
+            required_bbox_sensors.extend(
+                [
+                    "manip_task_relevant_object_bbox",
+                    "manip_accurate_object_bbox",
+                ]
+            )
+        for sensor in required_bbox_sensors:
+            if sensor not in args.input_sensors:
+                args.input_sensors.append(sensor)
+
+    filtered_input_sensors = [
+        sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
+    ]
+    if len(filtered_input_sensors) != len(args.input_sensors):
+        warnings.warn(
+            "Removing 'raw_manipulation_camera' from input sensors to reduce inference load.",
+            RuntimeWarning,
+        )
+        args.input_sensors = filtered_input_sensors
+
+    args._prepared_input_sensors = True
+
 
 class AdamWSkipLoadStateDict(optim.AdamW):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -105,30 +140,7 @@ class LitModel(pl.LightningModule):
         super().__init__()
         self.use_non_strict_ckpt_loading = args.use_non_strict_ckpt_loading
         self.restart_optimizer = args.restart_optimizer
-        if "object_token" in args.model_version.lower() and args.detector_usage in {"eval_only", "train_only", "never"}:
-            required_bbox_sensors = [
-                "nav_task_relevant_object_bbox",
-                "nav_accurate_object_bbox",
-            ]
-            if "raw_manipulation_camera" in args.input_sensors:
-                required_bbox_sensors.extend(
-                    [
-                        "manip_task_relevant_object_bbox",
-                        "manip_accurate_object_bbox",
-                    ]
-                )
-            for sensor in required_bbox_sensors:
-                if sensor not in args.input_sensors:
-                    args.input_sensors.append(sensor)
-        filtered_input_sensors = [
-            sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
-        ]
-        if len(filtered_input_sensors) != len(args.input_sensors):
-            warnings.warn(
-                "Removing 'raw_manipulation_camera' from input sensors to reduce inference load.",
-                RuntimeWarning,
-            )
-            args.input_sensors = filtered_input_sensors
+        _prepare_input_sensors(args)
         model, preproc = REGISTERED_MODELS[args.model].build_model(
             model_version=args.model_version,
             input_sensors=args.input_sensors,
@@ -712,6 +724,7 @@ def get_dataloader(subset: str, args):
 
 
 def launch_training(args):
+    _prepare_input_sensors(args)
     local_world_size = max(torch.cuda.device_count(), 1)
 
     # create data loaders

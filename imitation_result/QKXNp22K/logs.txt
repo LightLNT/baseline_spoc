@@ -1,0 +1,180 @@
+video_action_table/val/0: +--------------------------+-------------------------------------------------------------+------------------------------------------------------+----------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+|           Task           |                         Observation                         |                      Actions_gt                      |                                   Actions_pred                                   |                                    Sensor_path                                    |
++--------------------------+-------------------------------------------------------------+------------------------------------------------------+----------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+|       find a bowl        | <wandb.sdk.data_types.video.Video object at 0x7efe11e12690> |  ['m', 'm', 'm', 'm', 'l', 'm', 'm', 'm', 'm', 'm']  | ['sub_done', 'sub_done', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002191/raw_navigation_camera__0.mp4 |
+| navigate to a houseplant | <wandb.sdk.data_types.video.Video object at 0x7efa3a1fafd0> |  ['m', 'm', 'm', 'm', 'm', 'r', 'm', 'm', 'r', 'm']  |   ['end', 'sub_done', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']    | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004816/raw_navigation_camera__9.mp4 |
+|      locate a bowl       | <wandb.sdk.data_types.video.Video object at 0x7ef9f1df9f90> | ['r', 'r', 'r', 'm', 'm', 'r', 'm', 'l', 'l', 'end'] |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002038/raw_navigation_camera__4.mp4 |
+|        find a bed        | <wandb.sdk.data_types.video.Video object at 0x7ef9f1e03f50> |  ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'r', 'm', 'm']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002178/raw_navigation_camera__2.mp4 |
+| navigate to a houseplant | <wandb.sdk.data_types.video.Video object at 0x7efa00f13810> |  ['m', 'm', 'm', 'm', 'm', 'r', 'm', 'm', 'r', 'm']  |   ['end', 'sub_done', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']    | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004816/raw_navigation_camera__9.mp4 |
+|      locate a chair      | <wandb.sdk.data_types.video.Video object at 0x7ef9f1da8a50> |  ['r', 'r', 'r', 'm', 'm', 'm', 'm', 'm', 'm', 'l']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004604/raw_navigation_camera__6.mp4 |
+| navigate to a television | <wandb.sdk.data_types.video.Video object at 0x7ef9f1da8210> |  ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002516/raw_navigation_camera__8.mp4 |
+|      locate a chair      | <wandb.sdk.data_types.video.Video object at 0x7ef9f1d5be10> |  ['r', 'r', 'r', 'm', 'm', 'm', 'm', 'm', 'm', 'l']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004604/raw_navigation_camera__6.mp4 |
+|   search for an apple    | <wandb.sdk.data_types.video.Video object at 0x7ef9f1d86d90> |  ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'r', 'm', 'm']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/001619/raw_navigation_camera__3.mp4 |
+|   locate a television    | <wandb.sdk.data_types.video.Video object at 0x7efa00f13a90> |  ['r', 'm', 'm', 'm', 'm', 'm', 'm', 'r', 'm', 'm']  |      ['end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end', 'end']      | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/003871/raw_navigation_camera__6.mp4 |
++--------------------------+-------------------------------------------------------------+------------------------------------------------------+----------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+
+step: 9
+actions_loss/train: 0.8599748015403748
+loss/train: 0.8599748015403748
+train_steps: 10.0
+train_frames: 51190.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 19
+actions_loss/train: 0.8430323004722595
+loss/train: 0.8430323004722595
+train_steps: 20.0
+train_frames: 102350.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 29
+actions_loss/train: 0.8511158227920532
+loss/train: 0.8511158227920532
+train_steps: 30.0
+train_frames: 153550.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 39
+actions_loss/train: 0.826723575592041
+loss/train: 0.826723575592041
+train_steps: 40.0
+train_frames: 204750.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 49
+actions_loss/train: 0.8522230386734009
+loss/train: 0.8522230386734009
+train_steps: 50.0
+train_frames: 255890.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 59
+actions_loss/train: 0.8409347534179688
+loss/train: 0.8409347534179688
+train_steps: 60.0
+train_frames: 307070.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 69
+actions_loss/train: 0.8357815742492676
+loss/train: 0.8357815742492676
+train_steps: 70.0
+train_frames: 358270.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 79
+actions_loss/train: 0.8730901479721069
+loss/train: 0.8730901479721069
+train_steps: 80.0
+train_frames: 409450.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 89
+actions_loss/train: 0.843414843082428
+loss/train: 0.843414843082428
+train_steps: 90.0
+train_frames: 460630.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+video_action_table/val/98: +--------------------------+-------------------------------------------------------------+--------------------------------------------------------+----------------------------------------------------+-----------------------------------------------------------------------------------+
+|           Task           |                         Observation                         |                       Actions_gt                       |                    Actions_pred                    |                                    Sensor_path                                    |
++--------------------------+-------------------------------------------------------------+--------------------------------------------------------+----------------------------------------------------+-----------------------------------------------------------------------------------+
+|      locate a bowl       | <wandb.sdk.data_types.video.Video object at 0x7efe11f925d0> |   ['m', 'm', 'm', 'l', 'm', 'm', 'm', 'm', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002191/raw_navigation_camera__0.mp4 |
+|   locate a houseplant    | <wandb.sdk.data_types.video.Video object at 0x7efdfad02710> |   ['m', 'm', 'm', 'm', 'r', 'm', 'm', 'r', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004816/raw_navigation_camera__9.mp4 |
+|    navigate to a bowl    | <wandb.sdk.data_types.video.Video object at 0x7efa33f11190> |  ['r', 'r', 'r', 'm', 'm', 'r', 'm', 'l', 'l', 'end']  | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002038/raw_navigation_camera__4.mp4 |
+|       go to a bed        | <wandb.sdk.data_types.video.Video object at 0x7efe0756cfd0> |   ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002178/raw_navigation_camera__2.mp4 |
+|   locate a houseplant    | <wandb.sdk.data_types.video.Video object at 0x7efdf60d3b50> |   ['m', 'm', 'm', 'm', 'r', 'm', 'm', 'r', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004816/raw_navigation_camera__9.mp4 |
+|      go to a chair       | <wandb.sdk.data_types.video.Video object at 0x7efdf84c8110> |  ['r', 'r', 'm', 'm', 'm', 'm', 'm', 'm', 'l', 'end']  | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004604/raw_navigation_camera__6.mp4 |
+|    find a television     | <wandb.sdk.data_types.video.Video object at 0x7ef9f1eb22d0> |   ['m', 'm', 'm', 'm', 'l', 'm', 'm', 'm', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/002516/raw_navigation_camera__8.mp4 |
+|      go to a chair       | <wandb.sdk.data_types.video.Video object at 0x7ef9f1da8bd0> |  ['r', 'r', 'm', 'm', 'm', 'm', 'm', 'm', 'l', 'end']  | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/004604/raw_navigation_camera__6.mp4 |
+|   search for an apple    | <wandb.sdk.data_types.video.Video object at 0x7efdf5ef82d0> | ['m', 'm', 'm', 'l', 'm', 'm', 'rs', 'rs', 'm', 'end'] | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/001619/raw_navigation_camera__3.mp4 |
+| navigate to a television | <wandb.sdk.data_types.video.Video object at 0x7efdf84c9e90> |   ['m', 'm', 'm', 'm', 'r', 'm', 'r', 'm', 'm', 'm']   | ['m', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm', 'm'] | /nfs4/lint/PoliData/fifteen/ObjectNavType/val/003871/raw_navigation_camera__6.mp4 |
++--------------------------+-------------------------------------------------------------+--------------------------------------------------------+----------------------------------------------------+-----------------------------------------------------------------------------------+
+
+step: 0
+actions_loss/val: 0.805084228515625
+loss/val: 0.805084228515625
+train_steps: 98.0
+
+step: 1
+actions_loss/val: 0.8466933369636536
+loss/val: 0.8466933369636536
+train_steps: 98.0
+
+step: 2
+actions_loss/val: 0.8640731573104858
+loss/val: 0.8640731573104858
+train_steps: 98.0
+
+step: 3
+actions_loss/val: 0.894451379776001
+loss/val: 0.894451379776001
+train_steps: 98.0
+
+step: 97
+f1score_weighted/val: 0.6408376097679138
+f1score_macro/val: 0.12230891734361649
+f1score/m/val: 0.856162428855896
+f1score/r/val: 0.0
+f1score/l/val: 0.0
+f1score/b/val: 0.0
+f1score/end/val: 0.0
+f1score/sub_done/val: 0.0
+f1score/ls/val: 0.0
+f1score/rs/val: 0.0
+f1score/p/val: 0.0
+f1score/zm/val: 0.0
+f1score/zp/val: 0.0
+f1score/yp/val: 0.0
+f1score/ym/val: 0.0
+f1score/wp/val: 0.0
+f1score/wm/val: 0.0
+f1score/yms/val: 0.0
+f1score/zms/val: 0.0
+f1score/zps/val: 0.0
+f1score/yps/val: 0.0
+f1score/d/val: 0.0
+train_steps: 98.0
+epoch: 0
+
+step: 99
+actions_loss/train: 0.8294917345046997
+loss/train: 0.8294917345046997
+train_steps: 100.0
+train_frames: 511780.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 109
+actions_loss/train: 0.8149752020835876
+loss/train: 0.8149752020835876
+train_steps: 110.0
+train_frames: 562940.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 119
+actions_loss/train: 0.7701817154884338
+loss/train: 0.7701817154884338
+train_steps: 120.0
+train_frames: 614130.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+
+step: 129
+actions_loss/train: 0.7209336161613464
+loss/train: 0.7209336161613464
+train_steps: 130.0
+train_frames: 665250.0
+current_prob_to_sample_last_steps: 0.0
+epoch: 0
+

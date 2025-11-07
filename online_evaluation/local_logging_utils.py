@@ -63,7 +63,9 @@ class LocalWandbLogger(pl.loggers.wandb.WandbLogger):
 
     @property
     def version(self):
-        return self._experiment.id
+        if self._experiment is not None:
+            return self._experiment.id
+        return self._run_id
 
 
 class LoadLocalWandb:

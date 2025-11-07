@@ -1,4 +1,5 @@
 import random
+import warnings
 from functools import lru_cache
 from typing import Any, Dict
 
@@ -19,12 +20,22 @@ from utils.type_utils import REGISTERED_TASK_PARAMS
 
 PHYSICAL_ENTITY_SYNSET = wn.synset("physical_entity.n.01")
 
-SYNSET_TO_BEST_LEMMA = prior.load_dataset(
-    dataset="spoc-data",
-    entity="spoc-robot",
-    revision="objaverse-annotation-plus",
-    which_dataset="synset_to_best_lemma",
-)["train"].data
+try:
+    SYNSET_TO_BEST_LEMMA = prior.load_dataset(
+        dataset="spoc-data",
+        entity="spoc-robot",
+        revision="objaverse-annotation-plus",
+        which_dataset="synset_to_best_lemma",
+    )["train"].data
+except Exception as exc:
+    warnings.warn(
+        (
+            "Falling back to on-the-fly lemma extraction because prior.load_dataset failed: "
+            f"{type(exc).__name__}: {exc}"
+        ),
+        RuntimeWarning,
+    )
+    SYNSET_TO_BEST_LEMMA = {}
 
 
 _CACHED_LEMMAS = None
