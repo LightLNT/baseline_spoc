@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "--input_sensors",
         nargs="+",
-        default=["raw_navigation_camera", "raw_manipulation_camera"],
+        default=['raw_navigation_camera', 'nav_accurate_object_bbox', 'nav_task_relevant_object_bbox']
     )
     parser.add_argument("--model_version_override", default="auto")
     parser.add_argument("--total_num_videos", type=int, default=8200)
