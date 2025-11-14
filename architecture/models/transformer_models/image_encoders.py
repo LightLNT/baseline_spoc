@@ -106,10 +106,14 @@ class Dinov2(nn.Module):
 class SigLIPConfig:
     model: str = "ViT-B-16-SigLIP-256"
     output_size: Tuple[int, int, int] = (768, 7, 12)
+    input_size: Tuple[int, int] = (256, 256)
+    patch_grid: Tuple[int, int] = (16, 16)
+    width_crop: int = 0
+    detach_features: bool = True
 
 
 class SigLIP(nn.Module):
-    def __init__(self, cfg: Dinov2Config):
+    def __init__(self, cfg: SigLIPConfig):
         super().__init__()
         self.cfg = cfg
         siglip_full_model = create_model_from_pretrained("hf-hub:timm/{}".format(cfg.model))
@@ -118,15 +122,42 @@ class SigLIP(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(cfg.output_size[1:])
         self.eval()
 
+    def _forward_features(self, x: torch.Tensor, detach: Optional[bool] = None):
+        assert x.shape[-2:] == tuple(self.cfg.input_size), (
+            f"Expected shape is {self.cfg.input_size}; got {x.shape[-2:]}"
+        )
+        should_detach = self.cfg.detach_features if detach is None else detach
+        ctx = torch.no_grad() if should_detach else nullcontext()
+        with ctx:
+            features = self.model.forward_features(x)
+        return features
+
+    def forward_patch_tokens(self, x: torch.Tensor, detach: Optional[bool] = None):
+        features = self._forward_features(x, detach=detach)
+        if isinstance(features, dict):
+            patch_tokens = features.get("x_prenorm") or features.get("x_norm_patchtokens")
+        else:
+            patch_tokens = features
+        if patch_tokens is None:
+            raise ValueError("SigLIP forward_features did not return patch tokens.")
+        if patch_tokens.shape[1] == self.cfg.patch_grid[0] * self.cfg.patch_grid[1] + 1:
+            cls_tokens = patch_tokens[:, 0]
+            patch_tokens = patch_tokens[:, 1:]
+        else:
+            cls_tokens = patch_tokens.mean(dim=1)
+        return cls_tokens, patch_tokens
+
     def forward(self, x):
-        assert x.shape[-2:] == (256, 256), f"Expected shape is 256x256; got {x.shape}"
-        with torch.no_grad():
-            x = self.model.forward_features(x)
-            B, _, D = x.shape  # Bx256x768
-            x = x.permute(0, 2, 1)  # Bx768x256
-            x = x.reshape(B, D, 16, 16)
-            x = self.pool(x)
-            return x
+        _, patch_tokens = self.forward_patch_tokens(x, detach=True)
+        B, tokens, D = patch_tokens.shape
+        grid_h, grid_w = self.cfg.patch_grid
+        assert tokens == grid_h * grid_w, (
+            f"Expected {grid_h * grid_w} patch tokens, got {tokens}"
+        )
+        patch_tokens = patch_tokens.permute(0, 2, 1)
+        patch_tokens = patch_tokens.reshape(B, D, grid_h, grid_w)
+        patch_tokens = self.pool(patch_tokens)
+        return patch_tokens
 
 
 IMAGE_ENCODERS = dict(

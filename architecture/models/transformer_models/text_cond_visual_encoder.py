@@ -9,11 +9,12 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Uni
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from open_clip import create_model_from_pretrained
 from open_clip.transformer import TextTransformer
 from transformers import T5EncoderModel
 
-from architecture.models.transformer_models.image_encoders import IMAGE_ENCODERS, Dinov2
+from architecture.models.transformer_models.image_encoders import IMAGE_ENCODERS
 from architecture.models.transformer_models.object_token_extractor import (
     ObjectTokenExtractionOutput,
     ObjectTokenExtractor,
@@ -65,8 +66,8 @@ class TextCondVisualEncoderConfig:
 @dataclass
 class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     max_object_tokens: int = 10
-    detector_config_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
-    detector_weights_file: str = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+    detector_config_file: str = "~/detic/Detic/configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+    detector_weights_file: str = "~/detic/Detic/models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
     detector_prompt: str = "a "
     detector_device: Union[str, Sequence[str]] = "cuda"
     detector_confidence_threshold: Optional[float] = None
@@ -74,11 +75,12 @@ class ObjectTokenVisualEncoderConfig(TextCondVisualEncoderConfig):
     detector_max_size_test: Optional[int] = 640#None
     detector_phrases: Sequence[str] = field(default_factory=lambda: ["object"])
     max_detector_vocabulary: int = 32 #128
-    pooling: Literal["attention", "mean"] = "attention"
+    pooling: Literal["attention", "mean"] = "mean"
     min_patch_overlap: int = 1
     use_detector: bool = True
     detector_usage: Literal["always", "eval_only", "train_only", "never"] = "always"
     ground_truth_sensor_map: Dict[str, Sequence[str]] = field(default_factory=dict)
+    bbox_rotary_dim: int = 0
     # legacy fields kept for backward compatibility and gracefully ignored when Detic is used
     detector_model_id: Optional[str] = None
     detector_box_threshold: float = 0.25
@@ -289,8 +291,10 @@ class TextCondMultiCameraVisualEncoderWDoubleDet(TextCondMultiCameraVisualEncode
 class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
     def __init__(self, cfg: ObjectTokenVisualEncoderConfig):
         super().__init__(cfg)
-        if not isinstance(self.image_encoder, Dinov2):
-            raise ValueError("ObjectTokenVisualEncoder currently supports Dinov2 image encoders only.")
+        if not hasattr(self.image_encoder, "forward_patch_tokens"):
+            raise ValueError(
+                "ObjectTokenVisualEncoder requires image encoders exposing forward_patch_tokens."
+            )
         self.cfg: ObjectTokenVisualEncoderConfig = cfg
         extractor_cfg = ObjectTokenExtractorConfig(
             max_object_tokens=cfg.max_object_tokens,
@@ -302,6 +306,12 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
             nn.LayerNorm(self.image_encoder.cfg.output_size[0]),
             nn.Linear(self.image_encoder.cfg.output_size[0], self.cfg.fusion_xformer.d_model),
             nn.ReLU(),
+        )
+        rotary_dim = getattr(cfg, "bbox_rotary_dim", 0) or 0
+        self.bbox_rotary_embed = (
+            RotaryBBoxEncoding(self.cfg.fusion_xformer.d_model, rotary_dim)
+            if rotary_dim > 0
+            else None
         )
         self.detector: Optional[DeticPredictor] = None
         self.detector_device = torch.device("cpu")
@@ -813,7 +823,7 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
 
     def _prepare_sensor_tokens(
         self, extracted: ObjectTokenExtractionOutput
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cls_tokens = extracted.cls_tokens
         object_tokens = extracted.object_tokens
         combined = torch.cat([cls_tokens.unsqueeze(1), object_tokens], dim=1)
@@ -825,7 +835,11 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         adapted = self.visual_adapter(flat)
         adapted = adapted.reshape(combined.shape[0], combined.shape[1], -1)
         adapted = adapted * token_mask.unsqueeze(-1).float()
-        return adapted, token_mask
+        zeros = torch.zeros(
+            extracted.boxes.shape[0], 1, extracted.boxes.shape[-1], device=extracted.boxes.device
+        )
+        token_boxes = torch.cat([zeros, extracted.boxes], dim=1)
+        return adapted, token_mask, token_boxes
 
     def _update_detector_vocabulary(self, vocabulary: Sequence[str]) -> None:
         if not self.detector_pool:
@@ -1040,7 +1054,9 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
                 non_visual_sensors=non_visual_sensors,
             )
             extracted = self.object_token_extractor(flattened, boxes_list, scores_list)
-            sensor_tokens, token_mask = self._prepare_sensor_tokens(extracted)
+            sensor_tokens, token_mask, token_boxes = self._prepare_sensor_tokens(extracted)
+            if self.bbox_rotary_embed is not None:
+                sensor_tokens = self.bbox_rotary_embed(sensor_tokens, token_boxes, token_mask)
             all_img_features[sensor] = sensor_tokens
             self._store_latest(sensor, extracted, token_mask, labels_list, B, T, detector_meta)
 
@@ -1081,6 +1097,74 @@ class ObjectTokenVisualEncoder(TextCondMultiCameraVisualEncoder):
         fused_feats = fused_feats[:, 0, :]
 
         return fused_feats.reshape(B, T, D), text_feats
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).reshape_as(x)
+
+
+class RotaryBBoxEncoding(nn.Module):
+    def __init__(self, model_dim: int, rotary_dim: int = 128, base: float = 10000.0):
+        super().__init__()
+        rotary_dim = min(model_dim, rotary_dim)
+        rotary_dim = max(0, rotary_dim - (rotary_dim % 8))
+        self.rotary_dim = rotary_dim
+        if rotary_dim == 0:
+            self.register_buffer("inv_freq", torch.tensor([]), persistent=False)
+            return
+        self.coords = 4
+        self.per_coord_dim = rotary_dim // self.coords
+        if self.per_coord_dim % 2 != 0:
+            self.per_coord_dim -= 1
+        if self.per_coord_dim <= 0:
+            raise ValueError("Rotary dimension too small for bbox encoding.")
+        dim_half = self.per_coord_dim // 2
+        inv_freq = torch.exp(
+            torch.arange(0, dim_half, dtype=torch.float32) * (-math.log(base) / max(dim_half, 1))
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, token_feats: torch.Tensor, boxes: torch.Tensor, token_mask: torch.Tensor):
+        if self.rotary_dim == 0 or self.inv_freq.numel() == 0:
+            return token_feats
+
+        x_rot = token_feats[..., : self.rotary_dim]
+        x_pass = token_feats[..., self.rotary_dim :]
+
+        cos, sin = self._build_sin_cos(boxes, token_mask, x_rot.dtype, x_rot.device)
+        x_rotated = x_rot * cos + _rotate_half(x_rot) * sin
+        return torch.cat([x_rotated, x_pass], dim=-1)
+
+    def _build_sin_cos(self, boxes, token_mask, dtype, device):
+        # boxes: (B, N, 4)
+        x0, y0, x1, y1 = boxes.unbind(-1)
+        centers = torch.stack([(x0 + x1) * 0.5, (y0 + y1) * 0.5], dim=-1)
+        sizes = torch.stack([(x1 - x0).abs(), (y1 - y0).abs()], dim=-1)
+        coords = torch.cat([centers, sizes], dim=-1).clamp(min=0.0, max=1.0)
+        sin_parts = []
+        cos_parts = []
+        freq = self.inv_freq.to(device=device, dtype=dtype)
+        for idx in range(coords.shape[-1]):
+            coord = coords[..., idx].unsqueeze(-1)
+            angles = coord * freq
+            sin = torch.repeat_interleave(torch.sin(angles), 2, dim=-1)
+            cos = torch.repeat_interleave(torch.cos(angles), 2, dim=-1)
+            target_dim = self.per_coord_dim
+            if sin.shape[-1] < target_dim:
+                pad = target_dim - sin.shape[-1]
+                sin = F.pad(sin, (0, pad))
+                cos = F.pad(cos, (0, pad))
+            sin_parts.append(sin[..., :target_dim])
+            cos_parts.append(cos[..., :target_dim])
+
+        sin = torch.cat(sin_parts, dim=-1)
+        cos = torch.cat(cos_parts, dim=-1)
+        mask = token_mask.unsqueeze(-1).to(dtype=dtype, device=device)
+        sin = sin * mask
+        cos = cos * mask + (1.0 - mask)
+        return cos, sin
 
 
 class PositionalEncoder(nn.Module):

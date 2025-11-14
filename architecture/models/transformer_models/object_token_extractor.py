@@ -1,10 +1,8 @@
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import torch
 import torch.nn as nn
-
-from architecture.models.transformer_models.image_encoders import Dinov2
 
 
 @dataclass
@@ -27,15 +25,26 @@ class ObjectTokenExtractionOutput:
 
 
 class ObjectTokenExtractor(nn.Module):
-    def __init__(self, dinov2: Dinov2, cfg: ObjectTokenExtractorConfig):
+    def __init__(self, backbone: nn.Module, cfg: ObjectTokenExtractorConfig):
         super().__init__()
-        self.dinov2 = dinov2
+        self.backbone = backbone
         self.cfg = cfg
-        self.token_dim = dinov2.cfg.output_size[0]
-        self.patch_grid = dinov2.cfg.patch_grid
-        self.input_height, self.input_width = dinov2.cfg.input_size
-        self.width_crop = dinov2.cfg.width_crop
+        if not hasattr(backbone, "forward_patch_tokens"):
+            raise ValueError("Backbone must implement forward_patch_tokens for ObjectTokenExtractor.")
+        backbone_cfg: Any = getattr(backbone, "cfg", None)
+        if backbone_cfg is None:
+            raise ValueError("Backbone must expose a cfg attribute for ObjectTokenExtractor.")
+        required_attrs = ["output_size", "patch_grid", "input_size"]
+        for attr in required_attrs:
+            if not hasattr(backbone_cfg, attr):
+                raise ValueError(f"Backbone cfg must define '{attr}' for ObjectTokenExtractor.")
+        self.token_dim = backbone_cfg.output_size[0]
+        self.patch_grid = backbone_cfg.patch_grid
+        self.input_height, self.input_width = backbone_cfg.input_size
+        self.width_crop = getattr(backbone_cfg, "width_crop", 0)
         self.effective_width = self.input_width - 2 * self.width_crop
+        if self.effective_width <= 0:
+            raise ValueError("Invalid effective width computed from backbone configuration.")
         self.patch_height = self.input_height / self.patch_grid[0]
         self.patch_width = self.effective_width / self.patch_grid[1]
         if cfg.pooling == "attention":
@@ -49,9 +58,9 @@ class ObjectTokenExtractor(nn.Module):
         boxes: Sequence[torch.Tensor],
         scores: Optional[Sequence[torch.Tensor]] = None,
     ) -> ObjectTokenExtractionOutput:
-        cls_tokens, patch_tokens = self.dinov2.forward_patch_tokens(images, detach=True)
+        cls_tokens, patch_tokens = self.backbone.forward_patch_tokens(images, detach=True)
         if cls_tokens is None:
-            raise ValueError("DINOv2 forward_features did not return cls tokens; cannot fallback.")
+            raise ValueError("Backbone forward_features did not return cls tokens; cannot fallback.")
         batch = patch_tokens.shape[0]
         grid_h, grid_w = self.patch_grid
         device = patch_tokens.device

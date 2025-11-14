@@ -282,6 +282,25 @@ class EarlyFusionCnnTransformer(nn.Module):
                 "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
                 #"Detic_LCOCOI21k_CLIP_R18_640b32_4x_ft4x_max-size.pth"
             )
+            model_cfg.visual_encoder.bbox_rotary_dim = 128
+            detector_device_env = os.environ.get("DETIC_DEVICE") or os.environ.get("GROUNDING_DINO_DEVICE")
+            if detector_device_env:
+                model_cfg.visual_encoder.detector_device = detector_device_env
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version in {"object_token_siglip_small"}:
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = ObjectTokenVisualEncoderConfig()
+            model_cfg.visual_encoder.image_encoder = "SigLIPBase"
+            model_cfg.visual_encoder.text_encoder = "SigLIPBase"
+            model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
+            model_cfg.visual_encoder.input_sensors = input_sensors
+            model_cfg.visual_encoder.detector_config_file = (
+                "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+            )
+            model_cfg.visual_encoder.detector_weights_file = (
+                "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+            )
+            model_cfg.visual_encoder.bbox_rotary_dim = 128
             detector_device_env = os.environ.get("DETIC_DEVICE") or os.environ.get("GROUNDING_DINO_DEVICE")
             if detector_device_env:
                 model_cfg.visual_encoder.detector_device = detector_device_env

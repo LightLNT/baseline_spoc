@@ -1,3 +1,6 @@
+#training result
+online_eval_result
+imitation_result
 # build artifacts
 
 .eggs/
