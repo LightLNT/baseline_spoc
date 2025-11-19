@@ -209,11 +209,19 @@ class Preprocessor:
         return arm_proprioceptive
 
     def process_task_relevant_bbox(self, batch, sensor):
-        task_relevant_object_bbox = [torch.tensor(sample[sensor]).float() for sample in batch]
+        task_relevant_object_bbox = []
+        for sample in batch:
+            bbox = sample[sensor]
+            if isinstance(bbox, torch.Tensor):
+                bbox_tensor = bbox.clone().detach()
+            else:
+                bbox_tensor = torch.tensor(bbox)
+            task_relevant_object_bbox.append(bbox_tensor.float())
         if self.cfg.pad:
             return pad_sequence(task_relevant_object_bbox, batch_first=True, padding_value=-1).to(
                 self.device
             )
+        return task_relevant_object_bbox
 
     def create_padding_mask(self, lengths, max_length):
         # Create a range tensor with the shape (1,max_length)

@@ -45,7 +45,7 @@ def arg_parser_for_offline_training():
     parser.add_argument("--per_gpu_batch", type=int, default=16)
     parser.add_argument("--num_nodes", type=int, default=1)
     parser.add_argument("--lr", type=float, default=0.0001)
-    parser.add_argument("--sliding_window", type=int, default=50)
+    parser.add_argument("--sliding_window", type=int, default=100)
     parser.add_argument("--init_prob_sample_last_steps", type=float, default=0.0)
     parser.add_argument("--final_prob_sample_last_steps", type=float, default=0.0)
     parser.add_argument("--reduce_action_redundancy", type=str2bool, default=False)
@@ -91,6 +91,11 @@ def arg_parser_for_offline_training():
         default=4,
         help="Max number of timesteps per sample to render during visualization.",
     )
+    parser.add_argument(
+        "--keep_manip_camera",
+        action=argparse.BooleanOptionalAction,
+        help="If set, keep raw_manipulation_camera in the input sensors despite default filtering.",
+    )
     return parser
 
 def _prepare_input_sensors(args) -> None:
@@ -116,15 +121,16 @@ def _prepare_input_sensors(args) -> None:
             if sensor not in args.input_sensors:
                 args.input_sensors.append(sensor)
 
-    filtered_input_sensors = [
-        sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
-    ]
-    if len(filtered_input_sensors) != len(args.input_sensors):
-        warnings.warn(
-            "Removing 'raw_manipulation_camera' from input sensors to reduce inference load.",
-            RuntimeWarning,
-        )
-        args.input_sensors = filtered_input_sensors
+    if not getattr(args, "keep_manip_camera", False):
+        filtered_input_sensors = [
+            sensor for sensor in args.input_sensors if sensor != "raw_manipulation_camera"
+        ]
+        if len(filtered_input_sensors) != len(args.input_sensors):
+            warnings.warn(
+                "Removing 'raw_manipulation_camera' from input sensors to reduce inference load.",
+                RuntimeWarning,
+            )
+            args.input_sensors = filtered_input_sensors
 
     args._prepared_input_sensors = True
 

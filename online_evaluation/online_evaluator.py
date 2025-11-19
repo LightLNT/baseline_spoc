@@ -3,6 +3,7 @@ import os
 import platform
 import random
 import time
+import warnings
 from collections import defaultdict
 from queue import Empty as EmptyQueueError
 from typing import List, Dict
@@ -201,8 +202,9 @@ class OnlineEvaluatorManager:
         outdir="/data/results/online_evaluation/OnlineEval-default",
         exist_ok=True,
         table_size=200,
-        list_of_tasks=None,
-        input_sensors=("raw_navigation_camera", "raw_manipulation_camera"),
+    list_of_tasks=None,
+    input_sensors=("raw_navigation_camera",),
+    keep_manip_camera=False,
         skip_done=False,
         house_set="procthor",
         num_workers=1,
@@ -230,7 +232,31 @@ class OnlineEvaluatorManager:
         self.exist_ok = exist_ok
         self.list_of_tasks = [] if list_of_tasks is None else list_of_tasks
         self.table_size = int(round(max(table_size / len(self.list_of_tasks), 1)))
+        self.keep_manip_camera = keep_manip_camera
         self.input_sensors = list(input_sensors)
+        if not self.keep_manip_camera:
+            filtered_input_sensors = [
+                sensor for sensor in self.input_sensors if sensor != "raw_manipulation_camera"
+            ]
+            if len(filtered_input_sensors) != len(self.input_sensors):
+                warnings.warn(
+                    "Removing 'raw_manipulation_camera' from eval input sensors to reduce load.",
+                    RuntimeWarning,
+                )
+            self.input_sensors = filtered_input_sensors
+            if all(sensor != "raw_manipulation_camera" for sensor in self.input_sensors):
+                self.input_sensors = [
+                    sensor
+                    for sensor in self.input_sensors
+                    if not sensor.startswith("manip_")
+                ]
+        if "raw_manipulation_camera" in self.input_sensors:
+            for sensor in [
+                "manip_task_relevant_object_bbox",
+                "manip_accurate_object_bbox",
+            ]:
+                if sensor not in self.input_sensors:
+                    self.input_sensors.append(sensor)
         self.skip_done = skip_done
         self.house_set = house_set
         self.det_type = det_type

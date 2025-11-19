@@ -189,6 +189,32 @@ class EarlyFusionCnnTransformer(nn.Module):
         model_cfg = EarlyFusionCnnTransformerConfig()
         model_cfg.action_loss = "action" in loss
         model_cfg.visual_encoder.input_sensors = input_sensors
+
+        DETIC_CONFIG = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml"
+        DETIC_WEIGHTS = "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
+
+        def _configure_sparse_object_token_encoder(
+            image_encoder: str,
+            text_encoder: str = "t5-small",
+            include_cls_token: bool = True,
+            max_object_tokens: int = 12,
+            use_detector: bool = True,
+            freeze_image_encoder: bool = False,
+            freeze_text_encoder: bool = False,
+        ) -> ObjectTokenVisualEncoderConfig:
+            return ObjectTokenVisualEncoderConfig(
+                image_encoder=image_encoder,
+                text_encoder=text_encoder,
+                fusion_xformer=TransformerConfig(3, 512, 8),
+                input_sensors=input_sensors,
+                max_object_tokens=max(0, max_object_tokens),
+                detector_config_file=DETIC_CONFIG,
+                detector_weights_file=DETIC_WEIGHTS,
+                include_cls_token=include_cls_token,
+                use_detector=use_detector,
+                freeze_image_encoder=freeze_image_encoder,
+                freeze_text_encoder=freeze_text_encoder,
+            )
         if model_version == "small_3" or model_version == "small":
             model_cfg.visual_encoder.image_encoder = "Dinov2Small"
             model_cfg.visual_encoder.text_encoder = "t5-small"
@@ -265,6 +291,39 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.text_encoder = "t5-small"
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
             model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version == "object_token_dinov2_small_manip":
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = _configure_sparse_object_token_encoder(
+                image_encoder="Dinov2Small",
+                include_cls_token=True,
+                max_object_tokens=12,
+                use_detector=False, #是否开启实时模型检测
+                freeze_image_encoder=True,
+                freeze_text_encoder=True,
+            )
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version == "object_token_dinov2_small_no_cls":
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = _configure_sparse_object_token_encoder(
+                image_encoder="Dinov2Small",
+                include_cls_token=False,
+                max_object_tokens=12,
+                use_detector=True,
+                freeze_image_encoder=True,
+                freeze_text_encoder=True,
+            )
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version == "object_token_dinov2_small_k0":
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = _configure_sparse_object_token_encoder(
+                image_encoder="Dinov2Small",
+                include_cls_token=True,
+                max_object_tokens=0,
+                use_detector=False,
+                freeze_image_encoder=True,
+                freeze_text_encoder=True,
+            )
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
         elif model_version in {"object_token_small", "object_token_dinov2_small"}:
             model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
             model_cfg.visual_encoder = ObjectTokenVisualEncoderConfig()
@@ -286,6 +345,18 @@ class EarlyFusionCnnTransformer(nn.Module):
             detector_device_env = os.environ.get("DETIC_DEVICE") or os.environ.get("GROUNDING_DINO_DEVICE")
             if detector_device_env:
                 model_cfg.visual_encoder.detector_device = detector_device_env
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version == "object_token_siglip_small_manip":
+            model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"
+            model_cfg.visual_encoder = _configure_sparse_object_token_encoder(
+                image_encoder="SigLIPBase",
+                text_encoder="t5-small",
+                include_cls_token=True,
+                max_object_tokens=12,
+                use_detector=True,
+                freeze_image_encoder=True,
+                freeze_text_encoder=True,
+            )
             model_cfg.decoder = TransformerConfig(3, 512, 8)
         elif model_version in {"object_token_siglip_small"}:
             model_cfg.visual_text_encoder_class = "ObjectTokenVisualEncoder"

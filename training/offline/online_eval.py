@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import os
+import warnings
 
 import torch
 import wandb
@@ -41,7 +42,16 @@ def parse_args():
     parser.add_argument(
         "--input_sensors",
         nargs="+",
-        default=['raw_navigation_camera', 'nav_accurate_object_bbox', 'nav_task_relevant_object_bbox']
+        default=[
+            "raw_navigation_camera",
+            "nav_accurate_object_bbox",
+            "nav_task_relevant_object_bbox",
+        ],
+    )
+    parser.add_argument(
+        "--keep_manip_camera",
+        action=argparse.BooleanOptionalAction,
+        help="If set, retain raw_manipulation_camera in evaluation inputs even if filtering would normally remove it.",
     )
     parser.add_argument("--model_version_override", default="auto")
     parser.add_argument("--total_num_videos", type=int, default=8200)
@@ -129,6 +139,17 @@ def main(args):
 
     model_version = run.config["model_version"]
 
+    requires_manip_camera = "raw_manipulation_camera" in model_input_sensors
+    if args.keep_manip_camera is None:
+        args.keep_manip_camera = requires_manip_camera
+    elif not args.keep_manip_camera and requires_manip_camera:
+        warnings.warn(
+            "Checkpoint was trained with 'raw_manipulation_camera' but eval was asked to drop it. "
+            "This can crash the agent; re-enabling keep_manip_camera.",
+            RuntimeWarning,
+        )
+        args.keep_manip_camera = True
+
     if args.model_version_override != "auto":
         print(f"Enforcing model_version {args.model_version_override}")
         model_version = args.model_version_override
@@ -186,6 +207,7 @@ def main(args):
         "outdir": exp_dir,
         "list_of_tasks": list_of_tasks,
         "input_sensors": args.input_sensors,
+    "keep_manip_camera": bool(args.keep_manip_camera),
         "skip_done": args.skip_done,
         "house_set": args.house_set,
         "num_workers": args.num_workers,

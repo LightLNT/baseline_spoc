@@ -6,7 +6,7 @@
 set -euo pipefail
 
 PATTERN=${1:-"training.offline.train_pl"}
-
+#PATTERN=${1:-"poliformer"}
 mapfile -t PIDS < <(
     ps -eo pid=,command= \
     | grep -F "${PATTERN}" \
