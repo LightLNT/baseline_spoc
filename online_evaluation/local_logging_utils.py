@@ -39,6 +39,9 @@ class LocalWandbLogger(pl.loggers.wandb.WandbLogger):
         self._log_model = log_model
         self._logged_model_time: Dict[str, float] = {}
         self._checkpoint_callback = None
+        # Lightning's WandbLogger.finalize expects `_checkpoint_callbacks` to exist (dict of callback refs).
+        # Our lightweight logger doesn't register callbacks, but we keep an empty dict to satisfy the API.
+        self._checkpoint_callbacks = {}
 
     @property
     @rank_zero_only
@@ -63,7 +66,12 @@ class LocalWandbLogger(pl.loggers.wandb.WandbLogger):
 
     @property
     def version(self):
-        return self._experiment.id
+        if self._experiment is not None:
+            return self._experiment.id
+        # In non-rank-zero processes the experiment might not be initialized yet,
+        # but Lightning still queries the logger version. Fall back to the run id
+        # so every rank reports a stable identifier.
+        return self._run_id
 
 
 class LoadLocalWandb:

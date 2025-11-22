@@ -1,4 +1,9 @@
+from dataclasses import dataclass, field
+from typing import Optional
+
 import numpy as np
+import torch
+import torch.nn as nn
 from open_clip.tokenizer import HFTokenizer
 from open_clip.transformer import TextTransformer
 
@@ -31,9 +36,11 @@ EarlyFusionCnnTransformerPreprocessor = Preprocessor
 
 @dataclass
 class EarlyFusionCnnTransformerConfig:
-    visual_encoder: TextCondVisualEncoderConfig = TextCondVisualEncoderConfig()
+    visual_encoder: TextCondVisualEncoderConfig = field(
+        default_factory=TextCondVisualEncoderConfig
+    )
     visual_text_encoder_class: str = "TextCondMultiCameraVisualEncoder"
-    decoder: TransformerConfig = TransformerConfig(3, 512, 8)
+    decoder: TransformerConfig = field(default_factory=TransformerConfig)
     num_actions: int = len(ALL_STRETCH_ACTIONS)
     max_length: int = 1000
     action_loss: bool = True
@@ -185,6 +192,16 @@ class EarlyFusionCnnTransformer(nn.Module):
             model_cfg.visual_encoder.image_encoder = "Dinov2Small"
             model_cfg.visual_encoder.text_encoder = "t5-small"
             model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
+            model_cfg.decoder = TransformerConfig(3, 512, 8)
+        elif model_version in {"small_3_perceiver", "small_perceiver"}:
+            model_cfg.visual_encoder.image_encoder = "Dinov2Small"
+            model_cfg.visual_encoder.text_encoder = "t5-small"
+            model_cfg.visual_encoder.fusion_xformer = TransformerConfig(3, 512, 8)
+            model_cfg.visual_encoder.use_perceiver = True
+            model_cfg.visual_encoder.num_latent_tokens = 32
+            model_cfg.visual_encoder.perceiver_self_attn_layers = 1
+            model_cfg.visual_encoder.perceiver_self_attn_heads = 4
+            model_cfg.visual_encoder.perceiver_cross_attn_heads = 8
             model_cfg.decoder = TransformerConfig(3, 512, 8)
         elif model_version == "small_6":
             model_cfg.visual_encoder.image_encoder = "Dinov2Small"

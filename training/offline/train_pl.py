@@ -38,6 +38,12 @@ def arg_parser_for_offline_training():
     parser.add_argument("--wandb_entity_name", default="", type=str)
     parser.add_argument("--save_every", type=int, default=2000)
     parser.add_argument("--log_video_every", type=int, default=2000)
+    parser.add_argument(
+        "--log_manipulation_camera",
+        type=str2bool,
+        default=True,
+        help="Whether to include manipulation camera frames when logging videos. Disable for setups that only provide navigation visuals.",
+    )
     parser.add_argument("--max_epochs", type=int, default=250)
     parser.add_argument("--per_gpu_batch", type=int, default=16)
     parser.add_argument("--num_nodes", type=int, default=1)
@@ -91,6 +97,7 @@ class LitModel(pl.LightningModule):
         self.num_frames = 0
         self.frames_metric = SumMetric()
         self.log_video_every = args.log_video_every
+        self.log_manipulation_camera = args.log_manipulation_camera
 
     def on_fit_start(self):
         self.preproc.device = self.device
@@ -108,17 +115,25 @@ class LitModel(pl.LightningModule):
             actions_gt = list(batch_item["observations"]["actions"])
             task = batch_item["observations"]["goal"]
 
-            def combine_observations_and_save_path(nav_cam, manip_cam):
-                nav_cam = nav_cam.cpu().numpy()
-                manip_cam = manip_cam.cpu().numpy()
-                full_cam = np.concatenate([nav_cam, manip_cam], axis=2)
+            def build_video(nav_cam, manip_cam=None):
+                nav_cam_np = nav_cam.cpu().numpy()
+                if manip_cam is not None:
+                    manip_cam_np = manip_cam.cpu().numpy()
+                    full_cam = np.concatenate([nav_cam_np, manip_cam_np], axis=2)
+                else:
+                    full_cam = nav_cam_np
                 full_cam = np.transpose(full_cam, (0, 3, 1, 2))
                 return wandb.Video(full_cam, fps=5)
 
-            video = combine_observations_and_save_path(
-                batch_item["observations"]["raw_navigation_camera"],
-                batch_item["observations"]["raw_manipulation_camera"],
-            )
+            nav_frames = batch_item["observations"]["raw_navigation_camera"]
+            manip_frames = None
+            if (
+                self.log_manipulation_camera
+                and "raw_manipulation_camera" in batch_item["observations"]
+            ):
+                manip_frames = batch_item["observations"]["raw_manipulation_camera"]
+
+            video = build_video(nav_frames, manip_frames)
 
             sensor_path = batch_item["raw_navigation_camera"]
             data.append([task, video, actions_gt, actions_pred, sensor_path])
